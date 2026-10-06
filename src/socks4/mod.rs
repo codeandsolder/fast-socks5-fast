@@ -39,10 +39,6 @@ pub enum Socks4Command {
     Bind,
 }
 
-#[allow(
-    dead_code,
-    reason = "legacy SOCKS4 compatibility helper is not used by SOCKS5 builds"
-)]
 impl Socks4Command {
     #[inline]
     #[rustfmt::skip]

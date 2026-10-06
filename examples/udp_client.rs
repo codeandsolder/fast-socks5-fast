@@ -96,7 +96,7 @@ async fn spawn_socks_client() -> Result<()> {
 }
 
 /// Simple DNS request
-async fn dns_request<S: AsyncRead + AsyncWrite + Unpin>(
+async fn dns_request<S: AsyncRead + AsyncWrite + Unpin + Sync>(
     socket: &mut Socks5Datagram<S>,
     server: String,
     port: u16,

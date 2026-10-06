@@ -6,7 +6,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use fast_socks5::{
     ReplyError, Result, Socks5Command, SocksError,
-    server::{DnsResolveHelper as _, Socks5ServerProtocol, run_tcp_proxy, run_udp_proxy},
+    server::{Socks5ServerProtocol, resolve_request_dns, run_tcp_proxy, run_udp_proxy},
 };
 use std::{future::Future, num::ParseFloatError, time::Duration};
 use tokio::net::TcpListener;
@@ -116,7 +116,7 @@ async fn spawn_socks_server() -> Result<()> {
 }
 
 async fn serve_socks5(opt: &Opt, socket: tokio::net::TcpStream) -> Result<(), SocksError> {
-    let (proto, cmd, target_addr) = match &opt.auth {
+    let protocol = match &opt.auth {
         AuthMode::NoAuth if opt.skip_auth => {
             Socks5ServerProtocol::skip_auth_this_is_not_rfc_compliant(socket)
         }
@@ -128,11 +128,8 @@ async fn serve_socks5(opt: &Opt, socket: tokio::net::TcpStream) -> Result<(), So
             .await?
             .0
         }
-    }
-    .read_command()
-    .await?
-    .resolve_dns()
-    .await?;
+    };
+    let (proto, cmd, target_addr) = resolve_request_dns(protocol.read_command().await?).await?;
 
     match cmd {
         Socks5Command::TCPConnect => {

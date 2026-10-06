@@ -6,8 +6,8 @@ use clap::Parser;
 use fast_socks5::{
     ReplyError, Result, Socks5Command, SocksError, auth_method_enums,
     server::{
-        AuthMethod, AuthMethodSuccessState, DnsResolveHelper as _, PasswordAuthentication,
-        PasswordAuthenticationStarted, Socks5ServerProtocol, run_tcp_proxy,
+        AuthMethod, AuthMethodSuccessState, PasswordAuthentication, PasswordAuthenticationStarted,
+        Socks5ServerProtocol, resolve_request_dns, run_tcp_proxy,
     },
 };
 use std::{future::Future, time::Duration};
@@ -113,7 +113,7 @@ impl<T> AuthMethod<T> for BackdoorAuthentication {
         0xF0 // From the "RESERVED FOR PRIVATE METHODS" range
     }
 
-    fn new(self, inner: T) -> Self::StartingState {
+    fn start(self, inner: T) -> Self::StartingState {
         BackdoorAuthenticationStarted(inner)
     }
 }
@@ -150,7 +150,7 @@ async fn serve_socks5(socket: tokio::net::TcpStream) -> Result<(), SocksError> {
         AuthStarted::BackdoorAuthentication(auth) => auth.verify_timing().await?.finish_auth(),
     };
 
-    let (proto, cmd, target_addr) = proto.read_command().await?.resolve_dns().await?;
+    let (proto, cmd, target_addr) = resolve_request_dns(proto.read_command().await?).await?;
 
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
     match cmd {

@@ -77,7 +77,7 @@ impl ConnectError {
     }
 }
 
-pub async fn tcp_connect_with_timeout<T>(
+pub(crate) async fn tcp_connect_with_timeout<T>(
     addr: T,
     request_timeout: Duration,
 ) -> Result<TcpStream, ConnectError>
@@ -90,7 +90,7 @@ where
         .unwrap_or_else(|_| Err(ConnectError::ConnectionTimeout))
 }
 
-pub async fn tcp_connect<T>(addr: T) -> Result<TcpStream, ConnectError>
+pub(crate) async fn tcp_connect<T>(addr: T) -> Result<TcpStream, ConnectError>
 where
     T: ToSocketAddrs,
 {

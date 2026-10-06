@@ -59,6 +59,10 @@ pub enum TargetAddr {
 }
 
 impl TargetAddr {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if DNS lookup fails or returns no usable address.
     pub async fn resolve_dns(self) -> Result<Self, AddrError> {
         match self {
             Self::Ip(ip) => Ok(Self::Ip(ip)),
@@ -88,6 +92,10 @@ impl TargetAddr {
         !self.is_ip()
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a domain name is too long for the SOCKS5 one-byte length field.
     pub fn to_be_bytes(&self) -> Result<Vec<u8>, AddrError> {
         let mut buf = vec![];
         match self {
@@ -161,6 +169,10 @@ impl fmt::Display for TargetAddr {
 /// A trait for objects that can be converted to `TargetAddr`.
 pub trait ToTargetAddr {
     /// Converts the value of `self` to a `TargetAddr`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the value cannot be converted into a SOCKS target address.
     fn to_target_addr(&self) -> io::Result<TargetAddr>;
 }
 
@@ -232,7 +244,7 @@ pub enum Addr {
 }
 
 /// This function is used by the client & the server
-pub async fn read_address<T: AsyncRead + Unpin>(
+pub(crate) async fn read_address<T: AsyncRead + Unpin>(
     stream: &mut T,
     atyp: u8,
 ) -> Result<TargetAddr, AddrError> {

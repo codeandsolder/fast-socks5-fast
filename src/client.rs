@@ -54,6 +54,10 @@ where
 {
     /// Possibility to use a stream already created rather than
     /// creating a whole new `TcpStream::connect()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the SOCKS5 handshake, authentication, or underlying I/O fails.
     pub async fn use_stream(
         socket: S,
         auth: Option<AuthenticationMethod>,
@@ -84,6 +88,11 @@ where
         Ok(stream)
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request cannot be encoded or written, the reply is malformed,
+    /// or the proxy rejects the requested command.
     pub async fn request(
         &mut self,
         cmd: Socks5Command,
@@ -402,6 +411,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
     /// #   Ok(())
     /// # }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the local UDP socket cannot be created or the SOCKS5 UDP association fails.
     pub async fn bind<U>(backing_socket: S, client_bind_addr: U) -> Result<Self>
     where
         U: ToSocketAddrs,
@@ -416,6 +429,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
     /// Creates a UDP socket bound to the specified address which will have its
     /// traffic routed through the specified proxy. The given username and password
     /// is used to authenticate to the SOCKS proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the local UDP socket cannot be created, authentication fails, or the
+    /// SOCKS5 UDP association cannot be established.
     pub async fn bind_with_password<U>(
         backing_socket: S,
         client_bind_addr: U,
@@ -437,10 +455,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
         .await
     }
     /// Use a `UdpSocket` already created rather than creating a whole new `UdpSocket::bind`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the existing sockets cannot complete a SOCKS5 UDP association.
     pub async fn use_socket(backing_socket: S, out_sock: UdpSocket) -> Result<Self> {
         Self::bind_internal(backing_socket, out_sock, None).await
     }
     /// Same as `use_socket` but with credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if authentication or the SOCKS5 UDP association fails.
     pub async fn use_socket_with_password(
         backing_socket: S,
         out_sock: UdpSocket,
@@ -502,11 +528,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
     /// The SOCKS protocol inserts a header at the beginning of the message. The
     /// header will be 10 bytes for an IPv4 address, 22 bytes for an IPv6
     /// address, and 7 bytes plus the length of the domain for a domain address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the target address cannot be encoded or the UDP datagram cannot be sent.
     pub async fn send_to<A>(&self, data: &[u8], addr: A) -> Result<usize>
     where
-        A: ToTargetAddr,
+        A: ToTargetAddr + Send,
+        S: Sync,
     {
-        let mut buf = new_udp_header(addr)?;
+        let mut buf = new_udp_header(&addr)?;
         let buf_len = buf.len();
         buf.extend_from_slice(data);
 
@@ -514,7 +545,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
     }
 
     /// Like `UdpSocket::recv_from`.
-    pub async fn recv_from(&self, data_store: &mut [u8]) -> Result<(usize, TargetAddr)> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for socket failures, malformed or fragmented SOCKS5 UDP packets, or when
+    /// `data_store` is too small for the received payload.
+    pub async fn recv_from(&self, data_store: &mut [u8]) -> Result<(usize, TargetAddr)>
+    where
+        S: Sync,
+    {
         let mut buf = vec![0u8; 0x10000];
         let (size, _) = self.socket.recv_from(&mut buf).await?;
 
@@ -526,17 +565,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
             )));
         }
 
+        if data.len() > data_store.len() {
+            return Err(SocksError::ReceiveBufferTooSmall {
+                required: data.len(),
+                provided: data_store.len(),
+            });
+        }
         data_store[..data.len()].copy_from_slice(data);
         Ok((data.len(), target_addr))
     }
 
     /// Returns the address of the proxy-side UDP socket through which all
     /// messages will be routed.
-    pub fn proxy_addr(&self) -> Result<&TargetAddr> {
-        Ok(self
-            .proxy_addr
-            .as_ref()
-            .context("proxy addr is not ready")?)
+    pub const fn proxy_addr(&self) -> Option<&TargetAddr> {
+        self.proxy_addr.as_ref()
     }
 
     /// Returns a shared reference to the inner socket.
@@ -553,6 +595,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Socks5Datagram<S> {
 /// Api if you want to use `TcpStream` to create a new connection to the SOCKS5 server.
 impl Socks5Stream<TcpStream> {
     /// Connects to a target server through a SOCKS5 proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the proxy connection, SOCKS5 handshake, or target connection request fails.
     pub async fn connect<T>(
         socks_server: T,
         target_addr: String,
@@ -574,6 +620,10 @@ impl Socks5Stream<TcpStream> {
     }
 
     /// Connect with credentials
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the proxy connection, password authentication, or target connection request fails.
     pub async fn connect_with_password<T>(
         socks_server: T,
         target_addr: String,
@@ -600,6 +650,10 @@ impl Socks5Stream<TcpStream> {
 
     /// Process clients SOCKS requests
     /// This is the entry point where a whole request is processed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if connecting to the proxy, negotiating SOCKS5, or issuing `cmd` fails.
     pub async fn connect_raw<T>(
         cmd: Socks5Command,
         socks_server: T,

@@ -36,18 +36,6 @@
 //! Please check [`examples`](https://github.com/dizda/fast-socks5/tree/master/examples) directory.
 
 #![forbid(unsafe_code)]
-#![allow(
-    clippy::missing_errors_doc,
-    reason = "preserve the inherited public API while correctness and behavior are tightened"
-)]
-#![allow(
-    clippy::future_not_send,
-    reason = "generic transport APIs intentionally support local non-Send I/O implementations"
-)]
-#![allow(
-    clippy::needless_pass_by_value,
-    reason = "preserve public API compatibility for generic address conversion helpers"
-)]
 #[macro_use]
 extern crate log;
 
@@ -185,6 +173,8 @@ pub enum SocksError {
     AuthenticationRejected(String),
     #[error("{field} length {len} exceeds the SOCKS5 one-byte limit")]
     FieldTooLong { field: &'static str, len: usize },
+    #[error("receive buffer too small: need {required} bytes, got {provided}")]
+    ReceiveBufferTooSmall { required: usize, provided: usize },
 
     #[error(transparent)]
     ServerError(#[from] server::SocksServerError),
@@ -314,7 +304,9 @@ pub enum UdpHeaderError {
 ///     o  DST.PORT       desired destination port
 ///     o  DATA     user data
 /// ```
-pub fn new_udp_header<T: ToTargetAddr>(target_addr: T) -> Result<Vec<u8>, UdpHeaderError> {
+pub(crate) fn new_udp_header<T: ToTargetAddr + ?Sized>(
+    target_addr: &T,
+) -> Result<Vec<u8>, UdpHeaderError> {
     let mut header = vec![
         0, 0, // RSV
         0, // FRAG
@@ -330,7 +322,9 @@ pub fn new_udp_header<T: ToTargetAddr>(target_addr: T) -> Result<Vec<u8>, UdpHea
 }
 
 /// Parse data from UDP client on raw buffer, return (frag, `target_addr`, payload).
-pub async fn parse_udp_request(mut req: &[u8]) -> Result<(u8, TargetAddr, &[u8]), UdpHeaderError> {
+pub(crate) async fn parse_udp_request(
+    mut req: &[u8],
+) -> Result<(u8, TargetAddr, &[u8]), UdpHeaderError> {
     let rsv = read_exact!(req, [0u8; 2]).map_err(UdpHeaderError::ReadingError)?;
 
     if !rsv.eq(&[0u8; 2]) {
