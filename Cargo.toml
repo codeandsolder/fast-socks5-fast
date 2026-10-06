@@ -15,10 +15,6 @@ categories = [
 ]
 keywords = ["io", "proxy", "vpn", "async", "socks"]
 
-[features]
-default = []
-socks4 = []
-
 [dependencies]
 log = "0.4"
 tokio = { version = "1", features = ["io-util", "net", "time", "macros"] }
