@@ -36,6 +36,18 @@
 //! Please check [`examples`](https://github.com/dizda/fast-socks5/tree/master/examples) directory.
 
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::missing_errors_doc,
+    reason = "preserve the inherited public API while correctness and behavior are tightened"
+)]
+#![allow(
+    clippy::future_not_send,
+    reason = "generic transport APIs intentionally support local non-Send I/O implementations"
+)]
+#![allow(
+    clippy::needless_pass_by_value,
+    reason = "preserve public API compatibility for generic address conversion helpers"
+)]
 #[macro_use]
 extern crate log;
 
@@ -50,10 +62,10 @@ use std::fmt;
 use std::io;
 use thiserror::Error;
 use util::stream::ConnectError;
-use util::target_addr::read_address;
 use util::target_addr::AddrError;
 use util::target_addr::TargetAddr;
 use util::target_addr::ToTargetAddr;
+use util::target_addr::read_address;
 
 use tokio::io::AsyncReadExt;
 
@@ -85,38 +97,37 @@ pub mod consts {
     pub const SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 0x08;
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Socks5Command {
     TCPConnect,
     TCPBind,
     UDPAssociate,
 }
 
-#[allow(dead_code)]
 impl Socks5Command {
     #[inline]
     #[rustfmt::skip]
-    fn as_u8(&self) -> u8 {
+    const fn as_u8(&self) -> u8 {
         match self {
-            Socks5Command::TCPConnect   => consts::SOCKS5_CMD_TCP_CONNECT,
-            Socks5Command::TCPBind      => consts::SOCKS5_CMD_TCP_BIND,
-            Socks5Command::UDPAssociate => consts::SOCKS5_CMD_UDP_ASSOCIATE,
+            Self::TCPConnect   => consts::SOCKS5_CMD_TCP_CONNECT,
+            Self::TCPBind      => consts::SOCKS5_CMD_TCP_BIND,
+            Self::UDPAssociate => consts::SOCKS5_CMD_UDP_ASSOCIATE,
         }
     }
 
     #[inline]
     #[rustfmt::skip]
-    fn from_u8(code: u8) -> Option<Socks5Command> {
+    const fn from_u8(code: u8) -> Option<Self> {
         match code {
-            consts::SOCKS5_CMD_TCP_CONNECT      => Some(Socks5Command::TCPConnect),
-            consts::SOCKS5_CMD_TCP_BIND         => Some(Socks5Command::TCPBind),
-            consts::SOCKS5_CMD_UDP_ASSOCIATE    => Some(Socks5Command::UDPAssociate),
+            consts::SOCKS5_CMD_TCP_CONNECT      => Some(Self::TCPConnect),
+            consts::SOCKS5_CMD_TCP_BIND         => Some(Self::TCPBind),
+            consts::SOCKS5_CMD_UDP_ASSOCIATE    => Some(Self::UDPAssociate),
             _ => None,
         }
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum AuthenticationMethod {
     None,
     Password { username: String, password: String },
@@ -125,21 +136,11 @@ pub enum AuthenticationMethod {
 impl AuthenticationMethod {
     #[inline]
     #[rustfmt::skip]
-    fn as_u8(&self) -> u8 {
+    const fn as_u8(&self) -> u8 {
         match self {
-            AuthenticationMethod::None => consts::SOCKS5_AUTH_METHOD_NONE,
-            AuthenticationMethod::Password {..} =>
+            Self::None => consts::SOCKS5_AUTH_METHOD_NONE,
+            Self::Password {..} =>
                 consts::SOCKS5_AUTH_METHOD_PASSWORD
-        }
-    }
-
-    #[inline]
-    #[rustfmt::skip]
-    fn from_u8(code: u8) -> Option<AuthenticationMethod> {
-        match code {
-            consts::SOCKS5_AUTH_METHOD_NONE     => Some(AuthenticationMethod::None),
-            consts::SOCKS5_AUTH_METHOD_PASSWORD => Some(AuthenticationMethod::Password { username: "test".to_string(), password: "test".to_string()}),
-            _                                   => None,
         }
     }
 }
@@ -147,8 +148,8 @@ impl AuthenticationMethod {
 impl fmt::Display for AuthenticationMethod {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            AuthenticationMethod::None => f.write_str("AuthenticationMethod::None"),
-            AuthenticationMethod::Password { .. } => f.write_str("AuthenticationMethod::Password"),
+            Self::None => f.write_str("AuthenticationMethod::None"),
+            Self::Password { .. } => f.write_str("AuthenticationMethod::Password"),
         }
     }
 }
@@ -182,6 +183,8 @@ pub enum SocksError {
     ExceededMaxDomainLen(usize),
     #[error("Authentication rejected `{0}`")]
     AuthenticationRejected(String),
+    #[error("{field} length {len} exceeds the SOCKS5 one-byte limit")]
+    FieldTooLong { field: &'static str, len: usize },
 
     #[error(transparent)]
     ServerError(#[from] server::SocksServerError),
@@ -241,35 +244,36 @@ pub enum ReplyError {
 impl ReplyError {
     #[inline]
     #[rustfmt::skip]
-    pub fn as_u8(self) -> u8 {
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
         match self {
-            ReplyError::Succeeded               => consts::SOCKS5_REPLY_SUCCEEDED,
-            ReplyError::GeneralFailure          => consts::SOCKS5_REPLY_GENERAL_FAILURE,
-            ReplyError::ConnectionNotAllowed    => consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED,
-            ReplyError::NetworkUnreachable      => consts::SOCKS5_REPLY_NETWORK_UNREACHABLE,
-            ReplyError::HostUnreachable         => consts::SOCKS5_REPLY_HOST_UNREACHABLE,
-            ReplyError::ConnectionRefused       => consts::SOCKS5_REPLY_CONNECTION_REFUSED,
-            ReplyError::ConnectionTimeout       => consts::SOCKS5_REPLY_TTL_EXPIRED,
-            ReplyError::TtlExpired              => consts::SOCKS5_REPLY_TTL_EXPIRED,
-            ReplyError::CommandNotSupported     => consts::SOCKS5_REPLY_COMMAND_NOT_SUPPORTED,
-            ReplyError::AddressTypeNotSupported => consts::SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED,
+            Self::Succeeded               => consts::SOCKS5_REPLY_SUCCEEDED,
+            Self::GeneralFailure          => consts::SOCKS5_REPLY_GENERAL_FAILURE,
+            Self::ConnectionNotAllowed    => consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED,
+            Self::NetworkUnreachable      => consts::SOCKS5_REPLY_NETWORK_UNREACHABLE,
+            Self::HostUnreachable         => consts::SOCKS5_REPLY_HOST_UNREACHABLE,
+            Self::ConnectionRefused       => consts::SOCKS5_REPLY_CONNECTION_REFUSED,
+            Self::ConnectionTimeout | Self::TtlExpired => consts::SOCKS5_REPLY_TTL_EXPIRED,
+            Self::CommandNotSupported     => consts::SOCKS5_REPLY_COMMAND_NOT_SUPPORTED,
+            Self::AddressTypeNotSupported => consts::SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED,
 //            ReplyError::OtherReply(c)           => c,
         }
     }
 
     #[inline]
     #[rustfmt::skip]
-    pub fn from_u8(code: u8) -> ReplyError {
+    #[must_use]
+    pub fn from_u8(code: u8) -> Self {
         match code {
-            consts::SOCKS5_REPLY_SUCCEEDED                  => ReplyError::Succeeded,
-            consts::SOCKS5_REPLY_GENERAL_FAILURE            => ReplyError::GeneralFailure,
-            consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED     => ReplyError::ConnectionNotAllowed,
-            consts::SOCKS5_REPLY_NETWORK_UNREACHABLE        => ReplyError::NetworkUnreachable,
-            consts::SOCKS5_REPLY_HOST_UNREACHABLE           => ReplyError::HostUnreachable,
-            consts::SOCKS5_REPLY_CONNECTION_REFUSED         => ReplyError::ConnectionRefused,
-            consts::SOCKS5_REPLY_TTL_EXPIRED                => ReplyError::TtlExpired,
-            consts::SOCKS5_REPLY_COMMAND_NOT_SUPPORTED      => ReplyError::CommandNotSupported,
-            consts::SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED => ReplyError::AddressTypeNotSupported,
+            consts::SOCKS5_REPLY_SUCCEEDED                  => Self::Succeeded,
+            consts::SOCKS5_REPLY_GENERAL_FAILURE            => Self::GeneralFailure,
+            consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED     => Self::ConnectionNotAllowed,
+            consts::SOCKS5_REPLY_NETWORK_UNREACHABLE        => Self::NetworkUnreachable,
+            consts::SOCKS5_REPLY_HOST_UNREACHABLE           => Self::HostUnreachable,
+            consts::SOCKS5_REPLY_CONNECTION_REFUSED         => Self::ConnectionRefused,
+            consts::SOCKS5_REPLY_TTL_EXPIRED                => Self::TtlExpired,
+            consts::SOCKS5_REPLY_COMMAND_NOT_SUPPORTED      => Self::CommandNotSupported,
+            consts::SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED => Self::AddressTypeNotSupported,
 //            _                                               => ReplyError::OtherReply(code),
             _                                               => unreachable!("ReplyError code unsupported."),
         }
@@ -325,10 +329,8 @@ pub fn new_udp_header<T: ToTargetAddr>(target_addr: T) -> Result<Vec<u8>, UdpHea
     Ok(header)
 }
 
-/// Parse data from UDP client on raw buffer, return (frag, target_addr, payload).
-pub async fn parse_udp_request<'a>(
-    mut req: &'a [u8],
-) -> Result<(u8, TargetAddr, &'a [u8]), UdpHeaderError> {
+/// Parse data from UDP client on raw buffer, return (frag, `target_addr`, payload).
+pub async fn parse_udp_request(mut req: &[u8]) -> Result<(u8, TargetAddr, &[u8]), UdpHeaderError> {
     let rsv = read_exact!(req, [0u8; 2]).map_err(UdpHeaderError::ReadingError)?;
 
     if !rsv.eq(&[0u8; 2]) {
@@ -350,7 +352,7 @@ mod test {
         sync::oneshot::Sender,
     };
 
-    use crate::{client, server, ReplyError, Socks5Command};
+    use crate::{ReplyError, Socks5Command, client, server};
     use std::{
         net::{SocketAddr, ToSocketAddrs},
         num::ParseIntError,
@@ -376,7 +378,13 @@ mod test {
             target_addr = target_addr.resolve_dns().await?;
             match cmd {
                 Socks5Command::TCPConnect => {
-                    server::run_tcp_proxy(proto, &target_addr, 10, false).await?;
+                    server::run_tcp_proxy(
+                        proto,
+                        &target_addr,
+                        std::time::Duration::from_secs(10),
+                        false,
+                    )
+                    .await?;
                 }
                 Socks5Command::UDPAssociate => {
                     server::run_udp_proxy(proto, &target_addr, None, reply_ip, None).await?;

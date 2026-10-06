@@ -2,16 +2,15 @@
 #[macro_use]
 extern crate log;
 
+use clap::Parser;
 use fast_socks5::{
-    auth_method_enums,
+    ReplyError, Result, Socks5Command, SocksError, auth_method_enums,
     server::{
-        run_tcp_proxy, AuthMethod, AuthMethodSuccessState, DnsResolveHelper as _,
-        PasswordAuthentication, PasswordAuthenticationStarted, Socks5ServerProtocol,
+        AuthMethod, AuthMethodSuccessState, DnsResolveHelper as _, PasswordAuthentication,
+        PasswordAuthenticationStarted, Socks5ServerProtocol, run_tcp_proxy,
     },
-    ReplyError, Result, Socks5Command, SocksError,
 };
 use std::{future::Future, time::Duration};
-use structopt::StructOpt;
 use tokio::task;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -29,14 +28,14 @@ use tokio::{
 /// or via a cURL command
 ///     `curl -v -s --proxy "socks5://user:correct_horse_battery_staple@127.0.0.1:1337" "https://httpbin.org/get"`
 ///
-#[derive(Debug, StructOpt)]
-#[structopt(
+#[derive(Debug, Parser)]
+#[command(
     name = "socks5-server-custom-auth",
     about = "A socks5 server with a curious secret."
 )]
 struct Opt {
     /// Bind on address address. eg. `127.0.0.1:1080`
-    #[structopt(short, long)]
+    #[arg(short, long)]
     pub listen_addr: String,
 }
 
@@ -48,7 +47,7 @@ async fn main() -> Result<()> {
 }
 
 async fn spawn_socks_server() -> Result<()> {
-    let opt: Opt = Opt::from_args();
+    let opt: Opt = Opt::parse();
 
     let listener = TcpListener::bind(&opt.listen_addr).await?;
 

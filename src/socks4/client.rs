@@ -1,6 +1,6 @@
 #[forbid(unsafe_code)]
 use crate::read_exact;
-use crate::socks4::{consts, ReplyError, Socks4Command};
+use crate::socks4::{ReplyError, Socks4Command, consts};
 use crate::util::target_addr::{TargetAddr, ToTargetAddr};
 use crate::{Result, SocksError, SocksError::ReplySocks4Error};
 use anyhow::Context;
@@ -214,7 +214,7 @@ where
 {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        context: &mut std::task::Context,
+        context: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.socket).poll_read(context, buf)
@@ -228,7 +228,7 @@ where
 {
     fn poll_write(
         mut self: Pin<&mut Self>,
-        context: &mut std::task::Context,
+        context: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.socket).poll_write(context, buf)
@@ -236,14 +236,14 @@ where
 
     fn poll_flush(
         mut self: Pin<&mut Self>,
-        context: &mut std::task::Context,
+        context: &mut std::task::Context<'_>,
     ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.socket).poll_flush(context)
     }
 
     fn poll_shutdown(
         mut self: Pin<&mut Self>,
-        context: &mut std::task::Context,
+        context: &mut std::task::Context<'_>,
     ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.socket).poll_shutdown(context)
     }
@@ -298,8 +298,7 @@ mod tests {
     }
 
     fn assert_response_body(response_body: &String) {
-        let expected =
-            "Google is built by a large team of engineers, designers, researchers, robots, \
+        let expected = "Google is built by a large team of engineers, designers, researchers, robots, \
         and others in many different sites across the globe. It is updated continuously, \
         and built with more tools and technologies than we can shake a stick at. If you'd \
         like to help us out, see careers.google.com.";

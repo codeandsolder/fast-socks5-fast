@@ -4,8 +4,8 @@ extern crate log;
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use fast_socks5::{client::Socks5Datagram, Result};
-use structopt::StructOpt;
+use clap::Parser;
+use fast_socks5::{Result, client::Socks5Datagram};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
@@ -22,31 +22,31 @@ use tokio::{
 /// Query by domain name:
 ///   `$ RUST_LOG=debug cargo run --example udp_client -- --socks-server 127.0.0.1:1337 --username admin --password password -a dns.google -d github.com`
 ///
-#[derive(Debug, StructOpt)]
-#[structopt(
+#[derive(Debug, Parser)]
+#[command(
     name = "socks5-udp-client",
     about = "A simple example of a socks5 UDP client (proxied DNS client)."
 )]
 struct Opt {
     /// Socks5 server address + port, e.g. `127.0.0.1:1080`
-    #[structopt(short, long)]
+    #[arg(short, long)]
     pub socks_server: SocketAddr,
 
     /// Target (DNS) server address, e.g. `8.8.8.8`
-    #[structopt(short = "a", long)]
+    #[arg(short = 'a', long)]
     pub target_server: String,
 
     /// Target (DNS) server port, by default 53
-    #[structopt(short = "p", long)]
+    #[arg(short = 'p', long)]
     pub target_port: Option<u16>,
 
-    #[structopt(short = "d", long)]
+    #[arg(short = 'd', long)]
     pub query_domain: String,
 
-    #[structopt(short, long)]
+    #[arg(short, long)]
     pub username: Option<String>,
 
-    #[structopt(long)]
+    #[arg(long)]
     pub password: Option<String>,
 }
 
@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
 }
 
 async fn spawn_socks_client() -> Result<()> {
-    let opt: Opt = Opt::from_args();
+    let opt: Opt = Opt::parse();
 
     // Creating a SOCKS stream to the target address through the socks server
     let backing_socket = TcpStream::connect(opt.socks_server).await?;

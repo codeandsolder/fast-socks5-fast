@@ -2,22 +2,21 @@
 #[macro_use]
 extern crate log;
 
+use clap::{Parser, Subcommand};
 use fast_socks5::{
-    client,
-    server::{transfer, Socks5ServerProtocol},
+    ReplyError, Result, Socks5Command, SocksError, client,
+    server::{Socks5ServerProtocol, transfer},
     util::target_addr::TargetAddr,
-    ReplyError, Result, Socks5Command, SocksError,
 };
 use std::{
     collections::HashSet,
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
-use structopt::StructOpt;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -44,30 +43,30 @@ use tokio::{
 ///
 /// You can add more backends and they'll be used in a round-robin fashion.
 ///
-#[derive(Debug, StructOpt)]
-#[structopt(
+#[derive(Debug, Parser)]
+#[command(
     name = "socks5-router",
     about = "A socks5 demo 'router' proxying requests to further downstream socks5 servers."
 )]
 struct Opt {
     /// Bind on address address. eg. `127.0.0.1:1080`
-    #[structopt(short, long)]
+    #[arg(short, long)]
     pub listen_addr: String,
 
     /// Choose authentication type
-    #[structopt(subcommand, name = "auth")] // Note that we mark a field as a subcommand
+    #[command(subcommand)] // Note that we mark a field as a subcommand
     pub auth: AuthMode,
 }
 
 /// Choose the authentication type
-#[derive(StructOpt, Debug, PartialEq)]
+#[derive(Subcommand, Debug, PartialEq)]
 enum AuthMode {
     NoAuth,
     Password {
-        #[structopt(short, long)]
+        #[arg(short, long)]
         username: String,
 
-        #[structopt(short, long)]
+        #[arg(short, long)]
         password: String,
     },
 }
@@ -80,7 +79,7 @@ async fn main() -> Result<()> {
 }
 
 async fn spawn_socks_server() -> Result<()> {
-    let opt: &'static Opt = Box::leak(Box::new(Opt::from_args()));
+    let opt: &'static Opt = Box::leak(Box::new(Opt::parse()));
 
     let backends = Arc::new(RwLock::new(HashSet::new()));
 

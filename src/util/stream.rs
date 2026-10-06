@@ -63,15 +63,16 @@ pub enum ConnectError {
 }
 
 impl ConnectError {
-    pub fn to_reply_error(&self) -> ReplyError {
+    #[must_use]
+    pub const fn to_reply_error(&self) -> ReplyError {
         match self {
-            ConnectError::ConnectionTimeout => ReplyError::ConnectionTimeout,
-            ConnectError::ConnectionRefused(_) => ReplyError::ConnectionRefused,
-            ConnectError::ConnectionAborted(_) | ConnectError::ConnectionReset(_) => {
+            Self::ConnectionTimeout => ReplyError::ConnectionTimeout,
+            Self::ConnectionRefused(_) => ReplyError::ConnectionRefused,
+            Self::ConnectionAborted(_) | Self::ConnectionReset(_) => {
                 ReplyError::ConnectionNotAllowed
             }
-            ConnectError::NotConnected(_) => ReplyError::NetworkUnreachable,
-            ConnectError::Other(_) => ReplyError::GeneralFailure,
+            Self::NotConnected(_) => ReplyError::NetworkUnreachable,
+            Self::Other(_) => ReplyError::GeneralFailure,
         }
     }
 }
@@ -84,10 +85,9 @@ where
     T: ToSocketAddrs,
 {
     let fut = tcp_connect(addr);
-    match timeout(request_timeout, fut).await {
-        Ok(result) => result,
-        Err(_) => Err(ConnectError::ConnectionTimeout),
-    }
+    timeout(request_timeout, fut)
+        .await
+        .unwrap_or_else(|_| Err(ConnectError::ConnectionTimeout))
 }
 
 pub async fn tcp_connect<T>(addr: T) -> Result<TcpStream, ConnectError>

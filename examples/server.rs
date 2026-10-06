@@ -3,12 +3,12 @@
 extern crate log;
 
 use anyhow::Context;
+use clap::{Parser, Subcommand};
 use fast_socks5::{
-    server::{run_tcp_proxy, run_udp_proxy, DnsResolveHelper as _, Socks5ServerProtocol},
     ReplyError, Result, Socks5Command, SocksError,
+    server::{DnsResolveHelper as _, Socks5ServerProtocol, run_tcp_proxy, run_udp_proxy},
 };
 use std::{future::Future, num::ParseFloatError, time::Duration};
-use structopt::StructOpt;
 use tokio::net::TcpListener;
 use tokio::task;
 
@@ -22,46 +22,46 @@ use tokio::task;
 ///
 /// Same as above but with UDP support
 ///     `$ RUST_LOG=debug cargo run --example server -- --listen-addr 127.0.0.1:1337 --allow-udp --public-addr 127.0.0.1 password --username admin --password password`
-#[derive(Debug, StructOpt)]
-#[structopt(
+#[derive(Debug, Parser)]
+#[command(
     name = "socks5-server",
     about = "A simple implementation of a socks5-server."
 )]
 struct Opt {
     /// Bind on address address. eg. `127.0.0.1:1080`
-    #[structopt(short, long)]
+    #[arg(short, long)]
     pub listen_addr: String,
 
     /// Our external IP address to be sent in reply packets (required for UDP)
-    #[structopt(long)]
+    #[arg(long)]
     pub public_addr: Option<std::net::IpAddr>,
 
     /// Request timeout
-    #[structopt(short = "t", long, default_value = "10", parse(try_from_str=parse_duration))]
+    #[arg(short = 't', long, default_value = "10", value_parser=parse_duration)]
     pub request_timeout: Duration,
 
     /// Choose authentication type
-    #[structopt(subcommand, name = "auth")] // Note that we mark a field as a subcommand
+    #[command(subcommand)] // Note that we mark a field as a subcommand
     pub auth: AuthMode,
 
     /// Don't perform the auth handshake, send directly the command request
-    #[structopt(short = "k", long)]
+    #[arg(short = 'k', long)]
     pub skip_auth: bool,
 
     /// Allow UDP proxying, requires public-addr to be set
-    #[structopt(short = "U", long)]
+    #[arg(short = 'U', long)]
     pub allow_udp: bool,
 }
 
 /// Choose the authentication type
-#[derive(StructOpt, Debug, PartialEq)]
+#[derive(Subcommand, Debug, PartialEq)]
 enum AuthMode {
     NoAuth,
     Password {
-        #[structopt(short, long)]
+        #[arg(short, long)]
         username: String,
 
-        #[structopt(short, long)]
+        #[arg(short, long)]
         password: String,
     },
 }
@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
 }
 
 async fn spawn_socks_server() -> Result<()> {
-    let opt: &'static Opt = Box::leak(Box::new(Opt::from_args()));
+    let opt: &'static Opt = Box::leak(Box::new(Opt::parse()));
     if opt.allow_udp && opt.public_addr.is_none() {
         return Err(SocksError::ArgumentInputError(
             "Can't allow UDP if public-addr is not set",

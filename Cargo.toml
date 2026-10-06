@@ -2,10 +2,11 @@
 name = "fast-socks5"
 version = "1.0.0"
 authors = ["Jonathan Dizdarevic <dizzda@gmail.com>"]
-edition = "2021"
+edition = "2024"
+rust-version = "1.88"
 license = "MIT"
 description = "Fast SOCKS5 client/server implementation written in Rust async/.await (tokio)"
-repository = "https://github.com/dizda/fast-socks5"
+repository = "https://github.com/codeandsolder/fast-socks5-fast"
 categories = [
     "asynchronous",
     "network-programming",
@@ -22,15 +23,15 @@ socks4 = []
 log = "0.4"
 tokio = { version = "1", features = ["io-util", "net", "time", "macros"] }
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 tokio-stream = "0.1"
 async-trait = "0.1"
-socket2 = "0.5.8"
+socket2 = "0.6"
 
 # Dependencies for examples and tests
 [dev-dependencies]
-env_logger = "0.9"
-structopt = "0.3"
+env_logger = { version = "0.11", default-features = false }
+clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = [
     "io-util",
     "net",
@@ -51,3 +52,30 @@ name = "custom_auth_server"
 
 [[example]]
 name = "router"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+unfulfilled_lint_expectations = "deny"
+unexpected_cfgs = "deny"
+rust_2024_compatibility = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+await_holding_lock = "deny"
+allow_attributes_without_reason = "deny"

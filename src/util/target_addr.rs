@@ -1,7 +1,7 @@
+use crate::ReplyError;
 use crate::consts;
 use crate::consts::SOCKS5_ADDR_TYPE_IPV4;
 use crate::read_exact;
-use crate::ReplyError;
 use std::fmt;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -37,9 +37,10 @@ pub enum AddrError {
 }
 
 impl AddrError {
-    pub fn to_reply_error(&self) -> ReplyError {
+    #[must_use]
+    pub const fn to_reply_error(&self) -> ReplyError {
         match self {
-            AddrError::IncorrectAddressType => ReplyError::AddressTypeNotSupported,
+            Self::IncorrectAddressType => ReplyError::AddressTypeNotSupported,
             _ => ReplyError::ConnectionRefused,
         }
     }
@@ -58,40 +59,39 @@ pub enum TargetAddr {
 }
 
 impl TargetAddr {
-    pub async fn resolve_dns(self) -> Result<TargetAddr, AddrError> {
+    pub async fn resolve_dns(self) -> Result<Self, AddrError> {
         match self {
-            TargetAddr::Ip(ip) => Ok(TargetAddr::Ip(ip)),
-            TargetAddr::Domain(domain, port) => {
-                debug!("Attempt to DNS resolve the domain {}...", &domain);
+            Self::Ip(ip) => Ok(Self::Ip(ip)),
+            Self::Domain(domain, port) => {
+                debug!("Attempt to DNS resolve the domain {domain}...");
 
                 let socket_addr = lookup_host((&domain[..], port))
                     .await
-                    .map_err(|err| AddrError::DNSResolutionFailed(err))?
+                    .map_err(AddrError::DNSResolutionFailed)?
                     .next()
                     .ok_or(AddrError::NoDNSRecords)?;
-                debug!("domain name resolved to {}", socket_addr);
+                debug!("domain name resolved to {socket_addr}");
 
                 // has been converted to an ip
-                Ok(TargetAddr::Ip(socket_addr))
+                Ok(Self::Ip(socket_addr))
             }
         }
     }
 
-    pub fn is_ip(&self) -> bool {
-        match self {
-            TargetAddr::Ip(_) => true,
-            _ => false,
-        }
+    #[must_use]
+    pub const fn is_ip(&self) -> bool {
+        matches!(self, Self::Ip(_))
     }
 
-    pub fn is_domain(&self) -> bool {
+    #[must_use]
+    pub const fn is_domain(&self) -> bool {
         !self.is_ip()
     }
 
     pub fn to_be_bytes(&self) -> Result<Vec<u8>, AddrError> {
         let mut buf = vec![];
         match self {
-            TargetAddr::Ip(SocketAddr::V4(addr)) => {
+            Self::Ip(SocketAddr::V4(addr)) => {
                 debug!("TargetAddr::IpV4");
 
                 buf.extend_from_slice(&[SOCKS5_ADDR_TYPE_IPV4]);
@@ -100,7 +100,7 @@ impl TargetAddr {
                 buf.extend_from_slice(&(addr.ip()).octets()); // ip
                 buf.extend_from_slice(&addr.port().to_be_bytes()); // port
             }
-            TargetAddr::Ip(SocketAddr::V6(addr)) => {
+            Self::Ip(SocketAddr::V6(addr)) => {
                 debug!("TargetAddr::IpV6");
                 buf.extend_from_slice(&[consts::SOCKS5_ADDR_TYPE_IPV6]);
 
@@ -108,12 +108,14 @@ impl TargetAddr {
                 buf.extend_from_slice(&(addr.ip()).octets()); // ip
                 buf.extend_from_slice(&addr.port().to_be_bytes()); // port
             }
-            TargetAddr::Domain(ref domain, port) => {
+            Self::Domain(domain, port) => {
                 debug!("TargetAddr::Domain");
-                if domain.len() > u8::max_value() as usize {
+                if domain.len() > u8::MAX as usize {
                     return Err(AddrError::DomainLenTooLong(domain.len()));
                 }
-                buf.extend_from_slice(&[consts::SOCKS5_ADDR_TYPE_DOMAIN_NAME, domain.len() as u8]);
+                let domain_len = u8::try_from(domain.len())
+                    .map_err(|_| AddrError::DomainLenTooLong(domain.len()))?;
+                buf.extend_from_slice(&[consts::SOCKS5_ADDR_TYPE_DOMAIN_NAME, domain_len]);
                 buf.extend_from_slice(domain.as_bytes()); // domain content
                 buf.extend_from_slice(&port.to_be_bytes());
                 // port content (.to_be_bytes() convert from u16 to u8 type)
@@ -122,10 +124,11 @@ impl TargetAddr {
         Ok(buf)
     }
 
+    #[must_use]
     pub fn into_string_and_port(self) -> (String, u16) {
         match self {
-            TargetAddr::Ip(socket_addr) => (socket_addr.ip().to_string(), socket_addr.port()),
-            TargetAddr::Domain(domain, port) => (domain, port),
+            Self::Ip(socket_addr) => (socket_addr.ip().to_string(), socket_addr.port()),
+            Self::Domain(domain, port) => (domain, port),
         }
     }
 }
@@ -137,9 +140,8 @@ impl std::net::ToSocketAddrs for TargetAddr {
 
     fn to_socket_addrs(&self) -> io::Result<IntoIter<SocketAddr>> {
         match *self {
-            TargetAddr::Ip(addr) => Ok(vec![addr].into_iter()),
-            TargetAddr::Domain(_, _) => Err(io::Error::new(
-                io::ErrorKind::Other,
+            Self::Ip(addr) => Ok(vec![addr].into_iter()),
+            Self::Domain(_, _) => Err(io::Error::other(
                 "Domain name has to be explicitly resolved, please use TargetAddr::resolve_dns().",
             )),
         }
@@ -148,10 +150,10 @@ impl std::net::ToSocketAddrs for TargetAddr {
 
 impl fmt::Display for TargetAddr {
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            TargetAddr::Ip(ref addr) => write!(f, "{}", addr),
-            TargetAddr::Domain(ref addr, ref port) => write!(f, "{}:{}", addr, port),
+            Self::Ip(ref addr) => write!(f, "{addr}"),
+            Self::Domain(ref addr, ref port) => write!(f, "{addr}:{port}"),
         }
     }
 }
@@ -162,7 +164,7 @@ pub trait ToTargetAddr {
     fn to_target_addr(&self) -> io::Result<TargetAddr>;
 }
 
-impl<'a> ToTargetAddr for (&'a str, u16) {
+impl ToTargetAddr for (&str, u16) {
     fn to_target_addr(&self) -> io::Result<TargetAddr> {
         // try to parse as an IP first
         if let Ok(addr) = self.0.parse::<Ipv4Addr>() {
@@ -237,20 +239,19 @@ pub async fn read_address<T: AsyncRead + Unpin>(
     let addr = match atyp {
         consts::SOCKS5_ADDR_TYPE_IPV4 => {
             debug!("Address type `IPv4`");
-            Addr::V4(read_exact!(stream, [0u8; 4]).map_err(|err| AddrError::IPv4Unreadable(err))?)
+            Addr::V4(read_exact!(stream, [0u8; 4]).map_err(AddrError::IPv4Unreadable)?)
         }
         consts::SOCKS5_ADDR_TYPE_IPV6 => {
             debug!("Address type `IPv6`");
-            Addr::V6(read_exact!(stream, [0u8; 16]).map_err(|err| AddrError::IPv6Unreadable(err))?)
+            Addr::V6(read_exact!(stream, [0u8; 16]).map_err(AddrError::IPv6Unreadable)?)
         }
         consts::SOCKS5_ADDR_TYPE_DOMAIN_NAME => {
             debug!("Address type `domain`");
-            let len =
-                read_exact!(stream, [0]).map_err(|err| AddrError::DomainLenUnreadable(err))?[0];
+            let len = read_exact!(stream, [0]).map_err(AddrError::DomainLenUnreadable)?[0];
             let domain = read_exact!(stream, vec![0u8; len as usize])
-                .map_err(|err| AddrError::DomainContentUnreadable(err))?;
+                .map_err(AddrError::DomainContentUnreadable)?;
             // make sure the bytes are correct utf8 string
-            let domain = String::from_utf8(domain).map_err(|err| AddrError::Utf8(err))?;
+            let domain = String::from_utf8(domain).map_err(AddrError::Utf8)?;
 
             Addr::Domain(domain)
         }
@@ -258,18 +259,18 @@ pub async fn read_address<T: AsyncRead + Unpin>(
     };
 
     // Find port number
-    let port = read_exact!(stream, [0u8; 2]).map_err(|err| AddrError::PortNumberUnreadable(err))?;
+    let port = read_exact!(stream, [0u8; 2]).map_err(AddrError::PortNumberUnreadable)?;
     // Convert (u8 * 2) into u16
-    let port = (port[0] as u16) << 8 | port[1] as u16;
+    let port = u16::from(port[0]) << 8 | u16::from(port[1]);
 
     // Merge ADDRESS + PORT into a TargetAddr
     let addr: TargetAddr = match addr {
         Addr::V4([a, b, c, d]) => (Ipv4Addr::new(a, b, c, d), port)
             .to_target_addr()
-            .map_err(|err| AddrError::AddrConversionFailed(err))?,
+            .map_err(AddrError::AddrConversionFailed)?,
         Addr::V6(x) => (Ipv6Addr::from(x), port)
             .to_target_addr()
-            .map_err(|err| AddrError::AddrConversionFailed(err))?,
+            .map_err(AddrError::AddrConversionFailed)?,
         Addr::Domain(domain) => TargetAddr::Domain(domain, port),
     };
 

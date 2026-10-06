@@ -1,7 +1,7 @@
-[![License](https://img.shields.io/github/license/dizda/fast-socks5.svg)](https://github.com/dizda/fast-socks5)
+[![License](https://img.shields.io/github/license/codeandsolder/fast-socks5-fast.svg)](https://github.com/codeandsolder/fast-socks5-fast)
 [![crates.io](https://img.shields.io/crates/v/fast-socks5.svg)](https://crates.io/crates/fast-socks5)
-[![dependency status](https://deps.rs/repo/github/dizda/fast-socks5/status.svg)](https://deps.rs/repo/github/dizda/fast-socks5)
-[![Release](https://img.shields.io/github/release/dizda/fast-socks5.svg)](https://github.com/dizda/fast-socks5/releases)
+[![dependency status](https://deps.rs/repo/github/codeandsolder/fast-socks5-fast/status.svg)](https://deps.rs/repo/github/codeandsolder/fast-socks5-fast)
+[![Release](https://img.shields.io/github/release/codeandsolder/fast-socks5-fast.svg)](https://github.com/codeandsolder/fast-socks5-fast/releases)
 
 <h1 align="center">
   <br>
@@ -43,7 +43,7 @@
 - UDP is supported
 - All SOCKS5 RFC errors (replies) should be mapped
 - `IPv4`, `IPv6`, and `Domains` types are supported
-- Exhaustive [`examples`](https://github.com/dizda/fast-socks5/tree/master/examples) are provided that can be run immediately:
+- Exhaustive [`examples`](https://github.com/codeandsolder/fast-socks5-fast/tree/master/examples) are provided that can be run immediately:
   - client
   - server
   - custom_auth_server
@@ -60,7 +60,7 @@ Open in [crates.io](https://crates.io/crates/fast-socks5).
 
 ## Examples
 
-Please check [`examples`](https://github.com/dizda/fast-socks5/tree/master/examples) directory.
+Please check [`examples`](https://github.com/codeandsolder/fast-socks5-fast/tree/master/examples) directory.
 
 ```bash
 # Run client

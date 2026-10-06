@@ -3,9 +3,9 @@
 extern crate log;
 
 use anyhow::Context;
+use clap::Parser;
 use fast_socks5::client::Config;
-use fast_socks5::{client::Socks5Stream, Result};
-use structopt::StructOpt;
+use fast_socks5::{Result, client::Socks5Stream};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// # How to use it:
@@ -19,29 +19,29 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// GET / of web server by domain name:
 ///   `$ RUST_LOG=debug cargo run --example client -- --socks-server 127.0.0.1:1337 --username admin --password password -a perdu.com -p 80`
 ///
-#[derive(Debug, StructOpt)]
-#[structopt(name = "socks5-client", about = "A simple example of a socks5-client.")]
+#[derive(Debug, Parser)]
+#[command(name = "socks5-client", about = "A simple example of a socks5-client.")]
 struct Opt {
     /// Socks5 server address + port. eg. `127.0.0.1:1080`
-    #[structopt(short, long)]
+    #[arg(short, long)]
     pub socks_server: String,
 
     /// Target address server (not the socks server)
-    #[structopt(short = "a", long)]
+    #[arg(short = 'a', long)]
     pub target_addr: String,
 
     /// Target port server (not the socks server)
-    #[structopt(short = "p", long)]
+    #[arg(short = 'p', long)]
     pub target_port: u16,
 
-    #[structopt(short, long)]
+    #[arg(short, long)]
     pub username: Option<String>,
 
-    #[structopt(long)]
+    #[arg(long)]
     pub password: Option<String>,
 
     /// Don't perform the auth handshake, send directly the command request
-    #[structopt(short = "k", long)]
+    #[arg(short = 'k', long)]
     pub skip_auth: bool,
 }
 
@@ -53,25 +53,29 @@ async fn main() -> Result<()> {
 }
 
 async fn spawn_socks_client() -> Result<()> {
-    let opt: Opt = Opt::from_args();
+    let opt: Opt = Opt::parse();
     let domain = opt.target_addr.clone();
     let mut config = Config::default();
     config.set_skip_auth(opt.skip_auth);
 
     // Creating a SOCKS stream to the target address through the socks server
     let mut socks = match opt.username {
-        Some(username) => Socks5Stream::connect_with_password(
-            opt.socks_server,
-            opt.target_addr,
-            opt.target_port,
-            username,
-            opt.password.expect("Please fill the password"),
-            config,
-        )
-            .await?,
-
-        _ => Socks5Stream::connect(opt.socks_server, opt.target_addr, opt.target_port, config)
+        Some(username) => {
+            Socks5Stream::connect_with_password(
+                opt.socks_server,
+                opt.target_addr,
+                opt.target_port,
+                username,
+                opt.password.expect("Please fill the password"),
+                config,
+            )
             .await?
+        }
+
+        _ => {
+            Socks5Stream::connect(opt.socks_server, opt.target_addr, opt.target_port, config)
+                .await?
+        }
     };
 
     // Once connection is completed, can start to communicate with the server
