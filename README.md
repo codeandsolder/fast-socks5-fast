@@ -30,9 +30,9 @@
 - Cross-platform
 - Infinitely extensible, explicit server API based on typestates for safety
   - You control the request handling, the library only ensures you follow the proper protocol flow
-  - Can skip DNS resolution
+  - Domain targets remain unresolved so callers control DNS policy
   - Can skip the authentication/handshake process (not RFC-compliant, for private use, to save on useless round-trips)
-  - Instead of proxying in-process, swap out `run_tcp_proxy` for custom handling to build a router or to use a custom accelerated proxying method
+  - Dialing and relay are caller-owned; the crate only handles SOCKS5 protocol state
 - Authentication methods:
   - No-Auth method (`0x00`)
   - Username/Password auth method (`0x02`)

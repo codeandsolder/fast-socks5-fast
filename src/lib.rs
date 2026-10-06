@@ -12,9 +12,9 @@
 //! - Cross-platform
 //! - Infinitely extensible, explicit server API based on typestates for safety
 //!   - You control the request handling, the library only ensures you follow the proper protocol flow
-//!   - Can skip DNS resolution
+//!   - Domain targets are returned unresolved so the caller owns DNS policy
 //!   - Can skip the authentication/handshake process (not RFC-compliant, for private use, to save on useless round-trips)
-//!   - Instead of proxying in-process, swap out `run_tcp_proxy` for custom handling to build a router or to use a custom accelerated proxying method
+//!   - Dialing and relay are caller-owned; this crate only parses protocol state and encodes replies
 //! - Authentication methods:
 //!   - No-Auth method (`0x00`)
 //!   - Username/Password auth method (`0x02`)
@@ -35,6 +35,14 @@
 #![forbid(unsafe_code)]
 #[macro_use]
 extern crate log;
+
+#[macro_export]
+macro_rules! read_exact {
+    ($stream:expr, $array:expr) => {{
+        let mut buffer = $array;
+        $stream.read_exact(&mut buffer).await.map(|_| buffer)
+    }};
+}
 
 pub mod server;
 pub mod util;

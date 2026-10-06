@@ -1,11 +1,9 @@
-use crate::util::stream::{ConnectError, tcp_connect_with_timeout};
 use crate::util::target_addr::{AddrError, TargetAddr, read_address};
-use crate::{ReplyError, Socks5Command, consts, read_exact};
+use crate::{ReplyError, Socks5Command, consts};
 use std::io;
 use std::marker::PhantomData;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs as StdToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::string::FromUtf8Error;
-use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(thiserror::Error, Debug)]
@@ -21,11 +19,7 @@ pub enum SocksServerError {
         context: &'static str,
     },
     #[error(transparent)]
-    ConnectError(#[from] ConnectError),
-    #[error(transparent)]
     AddrError(#[from] AddrError),
-    #[error("BUG: {0}")] // should be unreachable
-    Bug(&'static str),
     #[error("Auth method unacceptable `{0:?}`.")]
     AuthMethodUnacceptable(Vec<u8>),
     #[error("Unsupported SOCKS version `{0}`.")]
@@ -598,90 +592,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenti
         );
 
         Ok((proto, cmd, target_addr))
-    }
-}
-
-/// Resolve the target address in a parsed SOCKS5 request while preserving protocol error replies.
-///
-/// # Errors
-///
-/// Returns an error if DNS resolution fails or the resulting protocol error reply cannot be written.
-pub async fn resolve_request_dns<T>(
-    request: (
-        Socks5ServerProtocol<T, states::CommandRead>,
-        Socks5Command,
-        TargetAddr,
-    ),
-) -> Result<
-    (
-        Socks5ServerProtocol<T, states::CommandRead>,
-        Socks5Command,
-        TargetAddr,
-    ),
-    SocksServerError,
->
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    let (proto, cmd, target_addr) = request;
-    let resolved_addr = try_notify!(proto, target_addr.resolve_dns().await);
-    Ok((proto, cmd, resolved_addr))
-}
-
-/// Handle the connect command by running a TCP proxy until the connection is done.
-///
-/// # Errors
-///
-/// Returns an error if connecting to the target times out or fails, if the SOCKS5 reply cannot be
-/// written, or if bidirectional proxy I/O fails.
-pub async fn run_tcp_proxy<T: AsyncRead + AsyncWrite + Unpin>(
-    proto: Socks5ServerProtocol<T, states::CommandRead>,
-    addr: &TargetAddr,
-    request_timeout: Duration,
-    nodelay: bool,
-) -> Result<T, SocksServerError> {
-    let addr = try_notify!(
-        proto,
-        addr.to_socket_addrs()
-            .err_when("converting to socket addr")
-            .and_then(|mut addrs| addrs.next().ok_or(SocksServerError::Bug("no socket addrs")))
-    );
-
-    // TCP connect with timeout, to avoid memory leak for connection that takes forever
-    let outbound = match tcp_connect_with_timeout(addr, request_timeout).await {
-        Ok(stream) => stream,
-        Err(err) => {
-            proto.reply_error(&err.to_reply_error()).await?;
-            return Err(err.into());
-        }
-    };
-
-    // Disable Nagle's algorithm if config specifies to do so.
-    try_notify!(
-        proto,
-        outbound.set_nodelay(nodelay).err_when("setting nodelay")
-    );
-
-    debug!("Connected to remote destination");
-
-    let mut inner = proto
-        .reply_success(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
-        .await?;
-
-    transfer(&mut inner, outbound).await;
-    Ok(inner)
-}
-
-/// Run a bidirectional proxy between two streams.
-/// Using 2 different generators, because they could be different structs with same traits.
-pub async fn transfer<I, O>(mut inbound: I, mut outbound: O)
-where
-    I: AsyncRead + AsyncWrite + Unpin,
-    O: AsyncRead + AsyncWrite + Unpin,
-{
-    match tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await {
-        Ok(res) => debug!("transfer closed ({}, {})", res.0, res.1),
-        Err(err) => error!("transfer error: {err:?}"),
     }
 }
 
