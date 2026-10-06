@@ -1,16 +1,18 @@
-#[forbid(unsafe_code)]
+#![forbid(unsafe_code)]
 #[macro_use]
 extern crate log;
 
+use anyhow::Result;
 use clap::Parser;
 use fast_socks5::{
-    ReplyError, Result, Socks5Command, SocksError, auth_method_enums,
+    ReplyError, Socks5Command, auth_method_enums,
     server::{
         AuthMethod, AuthMethodSuccessState, PasswordAuthentication, PasswordAuthenticationStarted,
         Socks5ServerProtocol, resolve_request_dns, run_tcp_proxy,
     },
 };
 use std::{future::Future, time::Duration};
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 use tokio::task;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -21,9 +23,6 @@ use tokio::{
 ///
 /// Listen on a local address:
 ///     `$ RUST_LOG=debug cargo run --example custom_auth_server -- --listen-addr 127.0.0.1:1337`
-///
-/// then try a client to connect to this server:
-///     `$ RUST_LOG=debug cargo run --example client -- --socks-server 127.0.0.1:1337 --username user --password "correct_horse_battery_staple" -a perdu.com -p 80`
 ///
 /// or via a cURL command
 ///     `curl -v -s --proxy "socks5://user:correct_horse_battery_staple@127.0.0.1:1337" "https://httpbin.org/get"`
@@ -51,7 +50,7 @@ async fn spawn_socks_server() -> Result<()> {
 
     let listener = TcpListener::bind(&opt.listen_addr).await?;
 
-    info!("Listen for socks connections @ {}", &opt.listen_addr);
+    info!("Listen for socks connections @ {}", opt.listen_addr);
 
     // Standard TCP loop
     loop {
@@ -60,7 +59,7 @@ async fn spawn_socks_server() -> Result<()> {
                 spawn_and_log_error(serve_socks5(socket));
             }
             Err(err) => {
-                error!("accept error = {:?}", err);
+                error!("accept error = {err:?}");
             }
         }
     }
@@ -70,6 +69,9 @@ pub struct BackdoorAuthenticationStarted<T>(T);
 pub struct BackdoorAuthenticationSuccess<T>(T);
 
 impl<T: AsyncRead + Unpin> BackdoorAuthenticationStarted<T> {
+    ///
+    /// # Errors
+    /// Returns an error when the timing or secret bytes do not satisfy this example method.
     pub async fn verify_timing(self) -> Result<BackdoorAuthenticationSuccess<T>> {
         let mut socket = self.0;
         let mut buf = vec![0u8; 2];
@@ -78,20 +80,20 @@ impl<T: AsyncRead + Unpin> BackdoorAuthenticationStarted<T> {
             .is_ok()
         {
             debug!("too early!");
-            return Err(SocksError::AuthenticationRejected("nope".to_owned()));
+            anyhow::bail!("authentication rejected");
         }
         if tokio::time::timeout(Duration::from_millis(500), socket.read_exact(&mut buf))
             .await
             .is_err()
         {
             debug!("too late!");
-            return Err(SocksError::AuthenticationRejected("nope".to_owned()));
+            anyhow::bail!("authentication rejected");
         }
         if buf[0] == 0x13 && buf[1] == 0x37 {
             Ok(BackdoorAuthenticationSuccess(socket))
         } else {
             debug!("wrong contents!");
-            Err(SocksError::AuthenticationRejected("nope".to_owned()))
+            Err(anyhow::anyhow!("authentication rejected"))
         }
     }
 }
@@ -125,7 +127,7 @@ auth_method_enums! {
     }
 }
 
-async fn serve_socks5(socket: tokio::net::TcpStream) -> Result<(), SocksError> {
+async fn serve_socks5(socket: tokio::net::TcpStream) -> Result<()> {
     let proto = match Socks5ServerProtocol::start(socket)
         .negotiate_auth(&[
             // The order of authentication methods can be tested by clients in sequence,
@@ -142,9 +144,7 @@ async fn serve_socks5(socket: tokio::net::TcpStream) -> Result<(), SocksError> {
                 auth.accept().await?.finish_auth()
             } else {
                 auth.reject().await?;
-                return Err(SocksError::AuthenticationRejected(
-                    "Wrong username/password".to_owned(),
-                ));
+                anyhow::bail!("authentication rejected: wrong username/password");
             }
         }
         AuthStarted::BackdoorAuthentication(auth) => auth.verify_timing().await?.finish_auth(),
@@ -152,16 +152,12 @@ async fn serve_socks5(socket: tokio::net::TcpStream) -> Result<(), SocksError> {
 
     let (proto, cmd, target_addr) = resolve_request_dns(proto.read_command().await?).await?;
 
-    const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-    match cmd {
-        Socks5Command::TCPConnect => {
-            run_tcp_proxy(proto, &target_addr, REQUEST_TIMEOUT, false).await?;
-        }
-        _ => {
-            proto.reply_error(&ReplyError::CommandNotSupported).await?;
-            return Err(ReplyError::CommandNotSupported.into());
-        }
-    };
+    if cmd == Socks5Command::TCPConnect {
+        run_tcp_proxy(proto, &target_addr, REQUEST_TIMEOUT, false).await?;
+    } else {
+        proto.reply_error(&ReplyError::CommandNotSupported).await?;
+        return Err(ReplyError::CommandNotSupported.into());
+    }
     Ok(())
 }
 
@@ -172,7 +168,7 @@ where
     task::spawn(async move {
         match fut.await {
             Ok(()) => {}
-            Err(err) => error!("{:#}", &err),
+            Err(err) => error!("{err:#}"),
         }
     })
 }

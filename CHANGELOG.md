@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 - SOCKS4/SOCKS4a client support and the `socks4` Cargo feature; this fork is SOCKS5-only.
+- Generic SOCKS5 client and built-in UDP relay implementations; server-side `UDPAssociate` command parsing remains so consumers can implement transport-specific datagram handling.
 
 ## [1.0.0] - 2026-01-20
 
