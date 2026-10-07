@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- SOCKS4/SOCKS4a client support and the `socks4` Cargo feature; this fork is SOCKS5-only.
+- Generic SOCKS5 client and built-in UDP relay implementations; server-side `UDPAssociate` command parsing remains so consumers can implement transport-specific datagram handling.
+- Built-in DNS resolution, TCP dialing/relay helpers, and the legacy target conversion/serialization surface; the fork now stops at parsed command/target plus reply encoding.
+
 ## [1.0.0] - 2026-01-20
 
 ### Breaking Changes
