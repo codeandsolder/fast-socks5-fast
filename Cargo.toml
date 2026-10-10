@@ -1,9 +1,9 @@
 [package]
 name = "fast-socks5"
-version = "1.0.0"
+version = "2.0.0"
 authors = ["Jonathan Dizdarevic <dizzda@gmail.com>"]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.99.0"
 license = "MIT"
 description = "Fast SOCKS5 server protocol implementation written in Rust async/.await (tokio)"
 repository = "https://github.com/codeandsolder/fast-socks5-fast"
