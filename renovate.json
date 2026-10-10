@@ -20,6 +20,16 @@
   },
   "packageRules": [
     {
+      "description": "Keep Cargo manifest requirements semver-ranged; Cargo.lock provides reproducibility",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "pin"
+      ],
+      "enabled": false
+    },
+    {
       "description": "Group routine compatible stable Rust dependency updates",
       "matchManagers": [
         "cargo"
