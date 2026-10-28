@@ -8,12 +8,11 @@ import datetime as dt
 import json
 import subprocess
 import sys
+import tomllib
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import NotRequired, TypedDict, cast
-
-import tomllib
 
 
 class LockPackage(TypedDict):

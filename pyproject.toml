@@ -2,7 +2,7 @@
 name = "fast-socks5-tools"
 version = "0.0.0"
 description = "Developer probes for fast-socks5-fast"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "dnspython>=2.8,<3",
     "pysocks>=1.7,<2",
