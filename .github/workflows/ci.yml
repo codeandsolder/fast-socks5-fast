@@ -17,7 +17,7 @@ permissions:
 jobs:
   stable:
     name: Rust 1.99.1 Linux checks and tests
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@bfade5fa936ccc3c68e562ae049602c85aa2f9ee # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@39f1e45632ec74fa43ef9976962c26f692c22b6e # main
     with:
       runner: ubuntu-24.04
       rust-toolchain: "1.99.1"
