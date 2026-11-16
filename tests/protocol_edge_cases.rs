@@ -8,7 +8,8 @@ use fast_socks5::{
 };
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufStream, DuplexStream};
+use tokio::time::{Duration, timeout};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -368,5 +369,63 @@ async fn malformed_utf8_target_reports_failure_without_carrying_domain_bytes() -
     };
     assert_eq!(source.valid_up_to(), 7);
     assert!(!format!("{source:?}").contains("secret"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn buffered_method_selection_is_flushed() -> TestResult {
+    let (mut client, server) = tokio::io::duplex(64);
+    let task =
+        tokio::spawn(
+            async move { Socks5ServerProtocol::accept_no_auth(BufStream::new(server)).await },
+        );
+    client.write_all(&[5, 1, 0]).await?;
+    let mut selected = [0; 2];
+    timeout(Duration::from_secs(1), client.read_exact(&mut selected)).await??;
+    assert_eq!(selected, [5, 0]);
+    task.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn buffered_method_rejection_is_flushed_before_drop() -> TestResult {
+    let (mut client, server) = tokio::io::duplex(64);
+    let task = tokio::spawn(async move {
+        Socks5ServerProtocol::start(BufStream::new(server))
+            .negotiate_auth(&[NoAuthentication])
+            .await
+    });
+    client.write_all(&[5, 1, 2]).await?;
+    let mut selected = [0; 2];
+    timeout(Duration::from_secs(1), client.read_exact(&mut selected)).await??;
+    assert_eq!(selected, [5, 0xff]);
+    assert!(matches!(
+        task.await?,
+        Err(SocksServerError::AuthMethodUnacceptable(_))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn buffered_password_success_and_failure_are_flushed() -> TestResult {
+    for accepted in [true, false] {
+        let (mut client, server) = tokio::io::duplex(64);
+        let task = tokio::spawn(async move {
+            Socks5ServerProtocol::accept_password_auth(BufStream::new(server), move |_, _| accepted)
+                .await
+        });
+        client.write_all(&[5, 1, 2]).await?;
+        let mut selected = [0; 2];
+        timeout(Duration::from_secs(1), client.read_exact(&mut selected)).await??;
+        assert_eq!(selected, [5, 2]);
+        client.write_all(&[1, 1, b'u', 1, b'p']).await?;
+        timeout(Duration::from_secs(1), client.read_exact(&mut selected)).await??;
+        assert_eq!(selected, [1, u8::from(!accepted)]);
+        match task.await? {
+            Ok(_) if accepted => (),
+            Err(SocksServerError::AuthenticationRejected) if !accepted => (),
+            _ => return Err("unexpected authentication result".into()),
+        }
+    }
     Ok(())
 }

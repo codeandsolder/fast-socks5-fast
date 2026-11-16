@@ -100,33 +100,6 @@ impl<T> Socks5ServerProtocol<T, states::Opened> {
     }
 }
 
-/// Authentication acceptance predicate.
-///
-/// For `Result<T, E>`, every `Ok` counts as accepted (including `Ok(false)`);
-/// return a `bool` directly when false should reject.
-pub trait CheckResult {
-    /// Whether the credential verifier accepted the provided credentials.
-    fn is_good(&self) -> bool;
-}
-
-impl CheckResult for bool {
-    fn is_good(&self) -> bool {
-        *self
-    }
-}
-
-impl<T> CheckResult for Option<T> {
-    fn is_good(&self) -> bool {
-        self.is_some()
-    }
-}
-
-impl<T, E> CheckResult for Result<T, E> {
-    fn is_good(&self) -> bool {
-        self.is_ok()
-    }
-}
-
 impl<T> Socks5ServerProtocol<T, states::Authenticated> {
     /// Finish handling the authentication method-specific part of the protocol,
     /// returning back to the overall SOCKS5 flow.
@@ -162,31 +135,28 @@ impl<T> Socks5ServerProtocol<T, states::Authenticated> {
     ///
     /// The verifier receives borrowed opaque credential bytes. RFC 1929 does not
     /// require UTF-8, so callers can interpret or compare the octets as needed.
-    /// The closure can mutate state variables and/or return a result as `Option`/`Result`.
+    /// Return `true` to accept the credentials and `false` to reject them.
+    /// Authentication never treats arbitrary successful `Result` values as authorization.
     ///
     /// # Errors
     ///
     /// Returns an error if negotiation or credential parsing fails, or if `check` rejects the credentials.
-    pub async fn accept_password_auth<F, R>(
-        inner: T,
-        mut check: F,
-    ) -> Result<(Self, R), SocksServerError>
+    pub async fn accept_password_auth<F>(inner: T, mut check: F) -> Result<Self, SocksServerError>
     where
         T: AsyncWrite + AsyncRead + Unpin + Send,
-        F: FnMut(&[u8], &[u8]) -> R + Send,
-        R: CheckResult + Send,
+        F: FnMut(&[u8], &[u8]) -> bool + Send,
     {
         let (user, pass, auth) = Socks5ServerProtocol::start(inner)
             .negotiate_auth(&[PasswordAuthentication])
             .await?
             .read_username_password()
             .await?;
-        let check_result = check(&user, &pass);
+        let accepted = check(&user, &pass);
         // Neither credential buffer needs to survive the verifier, particularly
         // across the next network I/O await.
         drop((user, pass));
-        if check_result.is_good() {
-            Ok((auth.accept().await?.finish_auth(), check_result))
+        if accepted {
+            Ok(auth.accept().await?.finish_auth())
         } else {
             auth.reject().await?;
             Err(SocksServerError::AuthenticationRejected)
@@ -343,6 +313,7 @@ impl<T: AsyncWrite + Unpin> PasswordAuthenticationImpl<T, password_states::Recei
             .write_all(&[1, consts::SOCKS5_AUTH_STATUS_SUCCESS])
             .await
             .err_when("replying auth success")?;
+        self.inner.flush().await.err_when("flushing auth success")?;
 
         debug!("Password authentication accepted.");
         Ok(PasswordAuthenticationImpl::new(self.inner))
@@ -358,6 +329,7 @@ impl<T: AsyncWrite + Unpin> PasswordAuthenticationImpl<T, password_states::Recei
             .write_all(&[1, consts::SOCKS5_AUTH_STATUS_FAILURE])
             .await
             .err_when("replying with auth method not acceptable")?;
+        self.inner.flush().await.err_when("flushing auth failure")?;
 
         debug!("Password authentication rejected.");
         Ok(())
@@ -496,6 +468,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::O
                         .write_all(&[consts::SOCKS5_VERSION, *client_method_id])
                         .await
                         .err_when("replying with auth method")?;
+                    self.inner
+                        .flush()
+                        .await
+                        .err_when("flushing selected auth method")?;
                     return Ok(server_method.start(self.inner));
                 }
             }
@@ -509,6 +485,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::O
             ])
             .await
             .err_when("replying with method not acceptable")?;
+        self.inner
+            .flush()
+            .await
+            .err_when("flushing rejected methods")?;
         Err(SocksServerError::AuthMethodUnacceptable(methods))
     }
 }
