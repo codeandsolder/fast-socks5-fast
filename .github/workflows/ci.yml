@@ -35,7 +35,7 @@ jobs:
 
   msrv:
     name: Rust 1.99.0 minimum-version check
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@be66a1ada16209be5b75d39724ef7383892d92cc # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@902094bd4b69dc21860a6253bbc819542a2acfa3 # main
     with:
       runner: ubuntu-24.04
       rust-toolchain: "1.99.0"
