@@ -64,4 +64,4 @@ For complete, runnable in-memory exchanges, see
   access-control policy.
 
 The crate retains the published package name `fast-socks5` and targets
-Rust 1.99 or newer.
+Rust 1.100 or newer.

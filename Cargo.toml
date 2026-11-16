@@ -3,7 +3,7 @@ name = "fast-socks5"
 version = "2.0.0"
 authors = ["Jonathan Dizdarevic <dizzda@gmail.com>"]
 edition = "2024"
-rust-version = "1.99.0"
+rust-version = "1.100.0"
 license = "MIT"
 description = "Fast SOCKS5 server protocol implementation written in Rust async/.await (tokio)"
 repository = "https://github.com/codeandsolder/fast-socks5-fast"
@@ -22,6 +22,9 @@ thiserror = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "rt", "macros", "time"] }
+
+[lints.cargo]
+unused_dependencies = "deny"
 
 [lints.rust]
 unsafe_code = "deny"
