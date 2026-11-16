@@ -8,7 +8,7 @@
 //! # Supported protocol
 //!
 //! - RFC 1928 no-authentication and username/password method negotiation.
-//! - RFC 1929 UTF-8 username/password authentication and custom authentication methods.
+//! - RFC 1929 arbitrary-octet username/password authentication and custom authentication methods.
 //! - CONNECT, BIND, and UDP ASSOCIATE command parsing (transport behavior is caller-owned).
 //! - IPv4, IPv6, and unresolved domain-form targets.
 //! - Typed state progression from authentication to request parsing and reply encoding.

@@ -115,7 +115,7 @@ async fn password_authentication_accepts_and_rejects_credentials() -> TestResult
         let (mut client, server) = tokio::io::duplex(256);
         let task = tokio::spawn(async move {
             Socks5ServerProtocol::accept_password_auth(server, |user, password| {
-                user == "user" && password == "secret"
+                user == b"user" && password == b"secret"
             })
             .await
         });
@@ -299,40 +299,60 @@ async fn truncated_greeting_returns_transport_error_without_panicking() -> TestR
 }
 
 #[tokio::test]
-async fn malformed_utf8_credentials_do_not_escape_via_error_debug() -> TestResult {
-    for invalid_field in ["username", "password"] {
-        let (mut client, server) = tokio::io::duplex(256);
-        let task = tokio::spawn(async move {
-            let auth = Socks5ServerProtocol::start(server)
-                .negotiate_auth(&[PasswordAuthentication])
-                .await?;
-            let _ = auth.read_username_password().await?;
-            Ok::<(), SocksServerError>(())
-        });
-        client.write_all(&[5, 1, 2]).await?;
-        let mut selection = [0; 2];
-        client.read_exact(&mut selection).await?;
-        assert_eq!(selection, [5, 2]);
-        // 9 bytes, with an unmistakable plaintext prefix and invalid UTF-8 suffix.
-        let invalid = b"secret!\xff";
-        if invalid_field == "username" {
-            client.write_all(&[1, u8::try_from(invalid.len())?]).await?;
-            client.write_all(invalid).await?;
-            client.write_all(&[1, b'p']).await?;
-        } else {
-            client
-                .write_all(&[1, 1, b'u', u8::try_from(invalid.len())?])
-                .await?;
-            client.write_all(invalid).await?;
-        }
-        let error = task.await?.err().ok_or("malformed credentials accepted")?;
-        let SocksServerError::FromUtf8 { source, .. } = error else {
-            return Err("unexpected credential error kind".into());
-        };
-        assert_eq!(source.valid_up_to(), invalid.len() - 1);
-        // The error stores only Utf8Error, never the input Vec<u8>.
-        assert!(!format!("{source:?}").contains("secret"));
-    }
+async fn arbitrary_binary_credentials_reach_verifier_unchanged() -> TestResult {
+    let username = [0x00, 0x80, 0xff];
+    let password = [0xff, 0x00, 0xc3, 0x28];
+    let (mut client, server) = tokio::io::duplex(256);
+    let task = tokio::spawn(async move {
+        Socks5ServerProtocol::accept_password_auth(server, |user, pass| {
+            user == username && pass == password
+        })
+        .await
+    });
+    client.write_all(&[5, 1, 2]).await?;
+    let mut selection = [0; 2];
+    client.read_exact(&mut selection).await?;
+    assert_eq!(selection, [5, 2]);
+
+    client
+        .write_all(&[1, u8::try_from(username.len())?])
+        .await?;
+    client.write_all(&username).await?;
+    client.write_all(&[u8::try_from(password.len())?]).await?;
+    client.write_all(&password).await?;
+    let mut status = [0; 2];
+    client.read_exact(&mut status).await?;
+    assert_eq!(status, [1, 0]);
+    assert!(task.await?.is_ok());
+    Ok(())
+}
+
+#[tokio::test]
+async fn password_parser_preserves_255_octets_without_text_conversion() -> TestResult {
+    let username: Vec<u8> = (0..=254).collect();
+    let password: Vec<u8> = (1..=255).collect();
+    let (mut client, server) = tokio::io::duplex(1024);
+    let task = tokio::spawn(async move {
+        let auth = Socks5ServerProtocol::start(server)
+            .negotiate_auth(&[PasswordAuthentication])
+            .await?;
+        let (user, pass, auth) = auth.read_username_password().await?;
+        assert_eq!(user, username);
+        assert_eq!(pass, password);
+        let _ = auth.accept().await?;
+        Ok::<(), SocksServerError>(())
+    });
+    client.write_all(&[5, 1, 2]).await?;
+    let mut selection = [0; 2];
+    client.read_exact(&mut selection).await?;
+    assert_eq!(selection, [5, 2]);
+    client.write_all(&[1, 255]).await?;
+    client.write_all(&(0..=254).collect::<Vec<u8>>()).await?;
+    client.write_all(&[255]).await?;
+    client.write_all(&(1..=255).collect::<Vec<u8>>()).await?;
+    client.read_exact(&mut selection).await?;
+    assert_eq!(selection, [1, 0]);
+    task.await??;
     Ok(())
 }
 
