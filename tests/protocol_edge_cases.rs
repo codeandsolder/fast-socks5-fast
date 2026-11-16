@@ -429,3 +429,54 @@ async fn buffered_password_success_and_failure_are_flushed() -> TestResult {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn offered_methods_max_length_and_fragmented_transport() -> TestResult {
+    for selected in [true, false] {
+        // Capacity one forces partial reads/writes even for a single-octet send.
+        let (mut client, server) = tokio::io::duplex(1);
+        let task = tokio::spawn(async move {
+            Socks5ServerProtocol::start(server)
+                .negotiate_auth(&[NoAuthentication])
+                .await
+        });
+        // Offered methods contain a full 255-octet list. In the accepted
+        // case, method 0 occurs at the very end of the list.
+        let mut methods = [0x77u8; 255];
+        if selected {
+            methods[254] = 0;
+        }
+        for octet in [5, 255].into_iter().chain(methods) {
+            timeout(Duration::from_secs(1), client.write_all(&[octet])).await??;
+        }
+        let mut reply = [0u8; 2];
+        timeout(Duration::from_secs(1), client.read_exact(&mut reply)).await??;
+        assert_eq!(reply, [5, if selected { 0 } else { 0xff }]);
+        match timeout(Duration::from_secs(1), task).await?? {
+            Ok(_) if selected => {}
+            Err(SocksServerError::AuthMethodUnacceptable(methods))
+                if !selected && methods == [0x77; 255] => {}
+            _ => return Err("unexpected maximum-length negotiation result".into()),
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_offered_method_list_is_rejected() -> TestResult {
+    let (mut client, server) = tokio::io::duplex(2);
+    let task = tokio::spawn(async move {
+        Socks5ServerProtocol::start(server)
+            .negotiate_auth(&[NoAuthentication])
+            .await
+    });
+    client.write_all(&[5, 0]).await?;
+    let mut reply = [0u8; 2];
+    timeout(Duration::from_secs(1), client.read_exact(&mut reply)).await??;
+    assert_eq!(reply, [5, 0xff]);
+    assert!(matches!(
+        task.await?,
+        Err(SocksServerError::AuthMethodUnacceptable(methods)) if methods.is_empty()
+    ));
+    Ok(())
+}
