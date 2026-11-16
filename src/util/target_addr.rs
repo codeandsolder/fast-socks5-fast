@@ -26,7 +26,7 @@ pub enum AddrError {
     DomainContentUnreadable(#[source] io::Error),
     #[error("malformed UTF-8")]
     /// A domain contained invalid UTF-8.
-    Utf8(#[source] std::string::FromUtf8Error),
+    Utf8(#[source] std::str::Utf8Error),
     #[error("unknown address type")]
     /// The address-type octet is not recognized.
     IncorrectAddressType,
@@ -91,7 +91,9 @@ pub(crate) async fn read_address<T: AsyncRead + Unpin>(
             }
             let domain = read_exact!(stream, vec![0_u8; usize::from(len)])
                 .map_err(AddrError::DomainContentUnreadable)?;
-            Addr::Domain(String::from_utf8(domain).map_err(AddrError::Utf8)?)
+            Addr::Domain(
+                String::from_utf8(domain).map_err(|err| AddrError::Utf8(err.utf8_error()))?,
+            )
         }
         _ => return Err(AddrError::IncorrectAddressType),
     };

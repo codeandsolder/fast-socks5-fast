@@ -4,6 +4,7 @@ use log::{debug, error, trace};
 use std::io;
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::str::Utf8Error;
 use std::string::FromUtf8Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -22,7 +23,7 @@ pub enum SocksServerError {
     /// A credential field could not be decoded as UTF-8.
     FromUtf8 {
         /// Invalid text encoding error.
-        source: FromUtf8Error,
+        source: Utf8Error,
         /// Protocol step being processed.
         context: &'static str,
     },
@@ -79,7 +80,13 @@ impl<T> ErrorContext<T> for Result<T, io::Error> {
 
 impl<T> ErrorContext<T> for Result<T, FromUtf8Error> {
     fn err_when(self, context: &'static str) -> Result<T, SocksServerError> {
-        self.map_err(|source| SocksServerError::FromUtf8 { source, context })
+        self.map_err(|err| SocksServerError::FromUtf8 {
+            // FromUtf8Error owns a copy of the supplied credential bytes; keep
+            // only the structural encoding error to avoid exposing credentials
+            // through Debug output or source-chain inspection.
+            source: err.utf8_error(),
+            context,
+        })
     }
 }
 

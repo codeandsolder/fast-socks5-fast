@@ -297,3 +297,56 @@ async fn truncated_greeting_returns_transport_error_without_panicking() -> TestR
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn malformed_utf8_credentials_do_not_escape_via_error_debug() -> TestResult {
+    for invalid_field in ["username", "password"] {
+        let (mut client, server) = tokio::io::duplex(256);
+        let task = tokio::spawn(async move {
+            let auth = Socks5ServerProtocol::start(server)
+                .negotiate_auth(&[PasswordAuthentication])
+                .await?;
+            let _ = auth.read_username_password().await?;
+            Ok::<(), SocksServerError>(())
+        });
+        client.write_all(&[5, 1, 2]).await?;
+        let mut selection = [0; 2];
+        client.read_exact(&mut selection).await?;
+        assert_eq!(selection, [5, 2]);
+        // 9 bytes, with an unmistakable plaintext prefix and invalid UTF-8 suffix.
+        let invalid = b"secret!\xff";
+        if invalid_field == "username" {
+            client.write_all(&[1, u8::try_from(invalid.len())?]).await?;
+            client.write_all(invalid).await?;
+            client.write_all(&[1, b'p']).await?;
+        } else {
+            client
+                .write_all(&[1, 1, b'u', u8::try_from(invalid.len())?])
+                .await?;
+            client.write_all(invalid).await?;
+        }
+        let error = task.await?.err().ok_or("malformed credentials accepted")?;
+        let SocksServerError::FromUtf8 { source, .. } = error else {
+            return Err("unexpected credential error kind".into());
+        };
+        assert_eq!(source.valid_up_to(), invalid.len() - 1);
+        // The error stores only Utf8Error, never the input Vec<u8>.
+        assert!(!format!("{source:?}").contains("secret"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_utf8_target_reports_failure_without_carrying_domain_bytes() -> TestResult {
+    let mut request = vec![5, 1, 0, 3, 8];
+    request.extend_from_slice(b"secret!\xff");
+    let error = rejected_request(&request, 1).await?;
+    let SocksServerError::AddrError(fast_socks5::util::target_addr::AddrError::Utf8(source)) =
+        error
+    else {
+        return Err("unexpected address error kind".into());
+    };
+    assert_eq!(source.valid_up_to(), 7);
+    assert!(!format!("{source:?}").contains("secret"));
+    Ok(())
+}
