@@ -4,8 +4,6 @@ use log::{debug, error, trace};
 use std::io;
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::str::Utf8Error;
-use std::string::FromUtf8Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(thiserror::Error, Debug)]
@@ -16,14 +14,6 @@ pub enum SocksServerError {
     Io {
         /// Underlying transport error.
         source: io::Error,
-        /// Protocol step being processed.
-        context: &'static str,
-    },
-    #[error("string error when {context}: {source}")]
-    /// A credential field could not be decoded as UTF-8.
-    FromUtf8 {
-        /// Invalid text encoding error.
-        source: Utf8Error,
         /// Protocol step being processed.
         context: &'static str,
     },
@@ -75,18 +65,6 @@ trait ErrorContext<T> {
 impl<T> ErrorContext<T> for Result<T, io::Error> {
     fn err_when(self, context: &'static str) -> Result<T, SocksServerError> {
         self.map_err(|source| SocksServerError::Io { source, context })
-    }
-}
-
-impl<T> ErrorContext<T> for Result<T, FromUtf8Error> {
-    fn err_when(self, context: &'static str) -> Result<T, SocksServerError> {
-        self.map_err(|err| SocksServerError::FromUtf8 {
-            // FromUtf8Error owns a copy of the supplied credential bytes; keep
-            // only the structural encoding error to avoid exposing credentials
-            // through Debug output or source-chain inspection.
-            source: err.utf8_error(),
-            context,
-        })
     }
 }
 
@@ -182,6 +160,8 @@ impl<T> Socks5ServerProtocol<T, states::Authenticated> {
     /// Handle the SOCKS5 auth negotiation supporting only the `PasswordAuthentication` method,
     /// and verify the provided username and password using the provided closure.
     ///
+    /// The verifier receives borrowed opaque credential bytes. RFC 1929 does not
+    /// require UTF-8, so callers can interpret or compare the octets as needed.
     /// The closure can mutate state variables and/or return a result as `Option`/`Result`.
     ///
     /// # Errors
@@ -193,7 +173,7 @@ impl<T> Socks5ServerProtocol<T, states::Authenticated> {
     ) -> Result<(Self, R), SocksServerError>
     where
         T: AsyncWrite + AsyncRead + Unpin + Send,
-        F: FnMut(String, String) -> R + Send,
+        F: FnMut(&[u8], &[u8]) -> R + Send,
         R: CheckResult + Send,
     {
         let (user, pass, auth) = Socks5ServerProtocol::start(inner)
@@ -201,7 +181,10 @@ impl<T> Socks5ServerProtocol<T, states::Authenticated> {
             .await?
             .read_username_password()
             .await?;
-        let check_result = check(user, pass);
+        let check_result = check(&user, &pass);
+        // Neither credential buffer needs to survive the verifier, particularly
+        // across the next network I/O await.
+        drop((user, pass));
         if check_result.is_good() {
             Ok((auth.accept().await?.finish_auth(), check_result))
         } else {
@@ -304,13 +287,14 @@ impl<T: AsyncRead + Unpin> PasswordAuthenticationImpl<T, password_states::Starte
     ///
     /// # Errors
     ///
-    /// Returns an error if the RFC 1929 credential frame is malformed, empty, invalid UTF-8, or cannot be read.
+    /// Returns an error if the RFC 1929 credential frame is malformed, empty, or cannot be read.
+    /// Credentials are returned as opaque octets; RFC 1929 does not define a character encoding.
     pub async fn read_username_password(
         self,
     ) -> Result<
         (
-            String,
-            String,
+            Vec<u8>,
+            Vec<u8>,
             PasswordAuthenticationImpl<T, password_states::Received>,
         ),
         SocksServerError,
@@ -341,9 +325,6 @@ impl<T: AsyncRead + Unpin> PasswordAuthenticationImpl<T, password_states::Starte
         let password =
             read_exact!(socket, vec![0u8; usize::from(pass_len)]).err_when("reading password")?;
         // The password must never be logged.
-
-        let username = String::from_utf8(username).err_when("converting username")?;
-        let password = String::from_utf8(password).err_when("converting password")?;
 
         Ok((username, password, PasswordAuthenticationImpl::new(socket)))
     }
