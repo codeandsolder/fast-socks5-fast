@@ -454,14 +454,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::O
         // {METHODS available from the client}
         // eg. (non-auth) {0, 1}
         // eg. (auth)     {0, 1, 2}
-        let methods = read_exact!(self.inner, vec![0u8; usize::from(methods_len)])
+        // SOCKS5 encodes NMETHODS in one octet. The offered list fits in a
+        // fixed stack buffer, avoiding an allocation for every connection.
+        // Preserve the offered bytes in the error only on negotiation failure.
+        let mut offered = [0u8; u8::MAX as usize];
+        let methods = &mut offered[..usize::from(methods_len)];
+        self.inner
+            .read_exact(methods)
+            .await
             .err_when("reading methods")?;
         debug!("methods supported sent by the client: {methods:?}");
 
         // server_methods order matter!
         // the server could choose to prioritize methods
         for server_method in server_methods {
-            for client_method_id in &methods {
+            for client_method_id in methods.iter() {
                 if server_method.method_id() == *client_method_id {
                     debug!("Reply with method {}", *client_method_id);
                     self.inner
@@ -489,7 +496,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::O
             .flush()
             .await
             .err_when("flushing rejected methods")?;
-        Err(SocksServerError::AuthMethodUnacceptable(methods))
+        Err(SocksServerError::AuthMethodUnacceptable(methods.to_vec()))
     }
 }
 
