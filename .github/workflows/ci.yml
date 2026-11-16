@@ -16,11 +16,11 @@ permissions:
 
 jobs:
   stable:
-    name: Rust 1.99.1 Linux checks and tests
+    name: Rust 1.100.0 Linux checks and tests
     uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@902094bd4b69dc21860a6253bbc819542a2acfa3 # main
     with:
       runner: ubuntu-24.04
-      rust-toolchain: "1.99.1"
+      rust-toolchain: "1.100.0"
       rust-components: "rustfmt clippy"
       command: |
         set -euo pipefail
@@ -28,16 +28,7 @@ jobs:
           echo 'allow(...) attributes are forbidden in Rust sources; use a narrow reasoned expect(...)' >&2
           exit 1
         fi
-        cargo +1.99.1 fmt --all --check
-        cargo +1.99.1 clippy --locked --all-targets --all-features -- -D warnings
-        cargo +1.99.1 test --locked --lib --tests
-        cargo +1.99.1 check --locked --all-features --all-targets
-
-  msrv:
-    name: Rust 1.99.0 minimum-version check
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@902094bd4b69dc21860a6253bbc819542a2acfa3 # main
-    with:
-      runner: ubuntu-24.04
-      rust-toolchain: "1.99.0"
-      command: |
-        cargo +1.99.0 check --locked --all-targets --all-features
+        cargo +1.100.0 fmt --all --check
+        cargo +1.100.0 clippy --locked --all-targets --all-features -- -D warnings
+        cargo +1.100.0 test --locked --lib --tests
+        cargo +1.100.0 check --locked --all-features --all-targets
