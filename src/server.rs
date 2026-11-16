@@ -1,5 +1,6 @@
 use crate::util::target_addr::{AddrError, TargetAddr, read_address};
 use crate::{ReplyError, Socks5Command, consts};
+use log::{debug, error, trace};
 use std::io;
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -7,34 +8,55 @@ use std::string::FromUtf8Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(thiserror::Error, Debug)]
+/// Errors from SOCKS5 negotiation, credential handling, and command parsing.
 pub enum SocksServerError {
     #[error("i/o error when {context}: {source}")]
+    /// Socket I/O failed while processing a protocol step.
     Io {
+        /// Underlying transport error.
         source: io::Error,
+        /// Protocol step being processed.
         context: &'static str,
     },
     #[error("string error when {context}: {source}")]
+    /// A credential field could not be decoded as UTF-8.
     FromUtf8 {
+        /// Invalid text encoding error.
         source: FromUtf8Error,
+        /// Protocol step being processed.
         context: &'static str,
     },
     #[error(transparent)]
+    /// A target address could not be decoded.
     AddrError(#[from] AddrError),
-    #[error("Auth method unacceptable `{0:?}`.")]
+    #[error("auth method unacceptable `{0:?}`")]
+    /// No offered authentication method was supported by the server.
     AuthMethodUnacceptable(Vec<u8>),
-    #[error("Unsupported SOCKS version `{0}`.")]
+    #[error("unsupported SOCKS version `{0}`")]
+    /// SOCKS5 protocol version does not match the supported version.
     UnsupportedSocksVersion(u8),
-    #[error("Unsupported SOCKS command `{0}`.")]
+    #[error("unsupported SOCKS command `{0}`")]
+    /// Unknown command octet in a SOCKS5 request.
     UnknownCommand(u8),
-    #[error("Empty username received")]
+    #[error("empty username received")]
+    /// The RFC 1929 username length was zero.
     EmptyUsername,
-    #[error("Empty password received")]
+    #[error("empty password received")]
+    /// The RFC 1929 password length was zero.
     EmptyPassword,
-    #[error("Authentication rejected")]
+    #[error("authentication rejected")]
+    /// The credential-verification callback rejected authentication.
     AuthenticationRejected,
+    #[error("unsupported username/password subnegotiation version `{0}`")]
+    /// Unsupported RFC 1929 subnegotiation version.
+    UnsupportedPasswordVersion(u8),
+    #[error("invalid SOCKS5 request reserved byte `{0}`")]
+    /// The SOCKS5 request reserved octet was not zero.
+    InvalidReservedByte(u8),
 }
 
 impl SocksServerError {
+    /// Map this error to a protocol reply status.
     #[must_use]
     pub const fn to_reply_error(&self) -> ReplyError {
         match self {
@@ -61,12 +83,17 @@ impl<T> ErrorContext<T> for Result<T, FromUtf8Error> {
     }
 }
 
+/// Type markers enforcing the authentication/command protocol progression.
 pub mod states {
+    /// Authentication method negotiation has not completed.
     pub struct Opened;
+    /// Authentication has completed.
     pub struct Authenticated;
+    /// The client request has been parsed and is ready for a reply.
     pub struct CommandRead;
 }
 
+/// SOCKS5 server state machine wrapping a caller-owned async stream.
 pub struct Socks5ServerProtocol<T, S> {
     inner: T,
     _state: PhantomData<S>,
@@ -88,7 +115,12 @@ impl<T> Socks5ServerProtocol<T, states::Opened> {
     }
 }
 
+/// Authentication acceptance predicate.
+///
+/// For `Result<T, E>`, every `Ok` counts as accepted (including `Ok(false)`);
+/// return a `bool` directly when false should reject.
 pub trait CheckResult {
+    /// Whether the credential verifier accepted the provided credentials.
     fn is_good(&self) -> bool;
 }
 
@@ -174,12 +206,14 @@ impl<T> Socks5ServerProtocol<T, states::Authenticated> {
 
 /// A trait for the final successful state of an authentication method's implementation.
 ///
-/// This allows `Socks5ServerProtocol<T, states::Authenticated>::finish_authentication` to
+/// This allows `Socks5ServerProtocol<T, states::Authenticated>::finish_auth` to
 /// let the user continue with the protocol after the socket has been handed off to the
 /// authentication method.
 pub trait AuthMethodSuccessState<T> {
+    /// Recover the transport after successful authentication.
     fn into_inner(self) -> T;
 
+    /// Complete the authentication state transition.
     fn finish_auth(self) -> Socks5ServerProtocol<T, states::Authenticated>
     where
         Self: Sized,
@@ -194,11 +228,15 @@ pub trait AuthMethodSuccessState<T> {
 /// Use blank structs for individual protocol implementations and
 /// enums for sets of supported protocols (you'll need a matching enum for the `Impl`).
 pub trait AuthMethod<T>: Copy {
+    /// Initial authentication state after method negotiation.
     type StartingState;
+    /// RFC 1928 authentication method identifier.
     fn method_id(self) -> u8;
+    /// Begin method-specific authentication on the stream.
     fn start(self, inner: T) -> Self::StartingState;
 }
 
+/// Successfully negotiated no-authentication method.
 pub struct NoAuthenticationImpl<T>(T);
 
 impl<T> AuthMethodSuccessState<T> for NoAuthenticationImpl<T> {
@@ -207,10 +245,10 @@ impl<T> AuthMethodSuccessState<T> for NoAuthenticationImpl<T> {
     }
 }
 
-/// The "NO AUTHENTICATION REQUIRED" auth method, ID 00h as specifed by RFC 1928.
+/// The "NO AUTHENTICATION REQUIRED" auth method, ID 00h as specified by RFC 1928.
 ///
 /// As the dummy no-auth method, it only has one state. Once it's been negotiated,
-/// you can immediately continue with `finish_authentication`.
+/// you can immediately continue with `finish_auth`.
 ///
 /// Or not so immediately: if you want to use no-authentication with e.g. IP address
 /// allowlisting or TLS client certificate auth for TLS-wrapped SOCKS5, this is your
@@ -236,11 +274,13 @@ mod password_states {
     pub struct Finished;
 }
 
+/// RFC 1929 password-authentication state machine.
 pub struct PasswordAuthenticationImpl<T, S> {
     inner: T,
     _state: PhantomData<S>,
 }
 
+/// Starting state for RFC 1929 username/password authentication.
 pub type PasswordAuthenticationStarted<T> = PasswordAuthenticationImpl<T, password_states::Started>;
 
 impl<T, S> PasswordAuthenticationImpl<T, S> {
@@ -271,26 +311,29 @@ impl<T: AsyncRead + Unpin> PasswordAuthenticationImpl<T, password_states::Starte
         let mut socket = self.inner;
         trace!("PasswordAuthenticationStarted: read_username_password()");
         let [version, user_len] = read_exact!(socket, [0u8; 2]).err_when("reading user len")?;
-        debug!("Auth: [version: {version}, user len: {user_len}]");
+        trace!("Password authentication username field length: {user_len}");
+        if version != 1 {
+            return Err(SocksServerError::UnsupportedPasswordVersion(version));
+        }
 
         if user_len < 1 {
             return Err(SocksServerError::EmptyUsername);
         }
 
         let username =
-            read_exact!(socket, vec![0u8; user_len as usize]).err_when("reading username")?;
-        debug!("username bytes: {username:?}");
+            read_exact!(socket, vec![0u8; usize::from(user_len)]).err_when("reading username")?;
+        // Credential bytes are never logged.
 
         let [pass_len] = read_exact!(socket, [0u8; 1]).err_when("reading password len")?;
-        debug!("Auth: [pass len: {pass_len}]");
+        trace!("Password authentication password field length: {pass_len}");
 
         if pass_len < 1 {
             return Err(SocksServerError::EmptyPassword);
         }
 
         let password =
-            read_exact!(socket, vec![0u8; pass_len as usize]).err_when("reading password")?;
-        debug!("password bytes: {password:?}");
+            read_exact!(socket, vec![0u8; usize::from(pass_len)]).err_when("reading password")?;
+        // The password must never be logged.
 
         let username = String::from_utf8(username).err_when("converting username")?;
         let password = String::from_utf8(password).err_when("converting password")?;
@@ -309,7 +352,7 @@ impl<T: AsyncWrite + Unpin> PasswordAuthenticationImpl<T, password_states::Recei
         mut self,
     ) -> Result<PasswordAuthenticationImpl<T, password_states::Finished>, SocksServerError> {
         self.inner
-            .write_all(&[1, consts::SOCKS5_REPLY_SUCCEEDED])
+            .write_all(&[1, consts::SOCKS5_AUTH_STATUS_SUCCESS])
             .await
             .err_when("replying auth success")?;
 
@@ -324,7 +367,7 @@ impl<T: AsyncWrite + Unpin> PasswordAuthenticationImpl<T, password_states::Recei
     /// Returns an error if the authentication rejection response cannot be written.
     pub async fn reject(mut self) -> Result<(), SocksServerError> {
         self.inner
-            .write_all(&[1, consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE])
+            .write_all(&[1, consts::SOCKS5_AUTH_STATUS_FAILURE])
             .await
             .err_when("replying with auth method not acceptable")?;
 
@@ -355,6 +398,7 @@ impl<T> AuthMethod<T> for PasswordAuthentication {
     }
 }
 
+/// Generate static-dispatch enums and authentication-method metadata for custom method sets.
 #[macro_export]
 macro_rules! auth_method_enums {
     (
@@ -364,28 +408,30 @@ macro_rules! auth_method_enums {
         }
     ) => {
         $(#[$state_enum_meta])*
+        #[doc = "Method-specific states while authentication is in progress."]
         $vis enum $state_enum<$state_enum_par> {
-            $($method($state)),+
+            $(#[doc = concat!("Starting state of the `", stringify!($method), "` authentication method.")] $method($state)),+
         }
 
         #[derive(Clone, Copy)]
         $(#[$enum_meta])*
+        #[doc = "Supported authentication method variants."]
         $vis enum $enum {
-            $($method($method)),+
+            $(#[doc = concat!("The `", stringify!($method), "` authentication method.")] $method($method)),+
         }
 
-        impl<T> AuthMethod<T> for $enum {
+        impl<T> $crate::server::AuthMethod<T> for $enum {
             type StartingState = $state_enum<T>;
 
             fn method_id(self) -> u8 {
                 match self {
-                    $($enum::$method(auth) => AuthMethod::<T>::method_id(auth)),+
+                    $($enum::$method(auth) => $crate::server::AuthMethod::<T>::method_id(auth)),+
                 }
             }
 
             fn start(self, inner: T) -> Self::StartingState {
                 match self {
-                    $($enum::$method(auth) => $state_enum::$method(auth.start(inner))),+
+                    $($enum::$method(auth) => $state_enum::$method($crate::server::AuthMethod::<T>::start(auth, inner))),+
                 }
             }
         }
@@ -448,8 +494,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::O
         // {METHODS available from the client}
         // eg. (non-auth) {0, 1}
         // eg. (auth)     {0, 1, 2}
-        let methods =
-            read_exact!(self.inner, vec![0u8; methods_len as usize]).err_when("reading methods")?;
+        let methods = read_exact!(self.inner, vec![0u8; usize::from(methods_len)])
+            .err_when("reading methods")?;
         debug!("methods supported sent by the client: {methods:?}");
 
         // server_methods order matter!
@@ -581,15 +627,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenti
 
         let mut proto = Socks5ServerProtocol::new(self.inner);
 
-        // Guess address type
-        let target_addr = try_notify!(proto, read_address(&mut proto.inner, address_type).await);
-
-        debug!("Request target is {target_addr}");
-
+        // Reject an invalid header before reading a potentially missing address body.
+        if rsv != 0 {
+            let err = SocksServerError::InvalidReservedByte(rsv);
+            proto.reply_error(&err.to_reply_error()).await?;
+            return Err(err);
+        }
         let cmd = try_notify!(
             proto,
             Socks5Command::from_u8(cmd).ok_or(SocksServerError::UnknownCommand(cmd))
         );
+        let target_addr = try_notify!(proto, read_address(&mut proto.inner, address_type).await);
+        trace!("Request target parsed");
 
         Ok((proto, cmd, target_addr))
     }

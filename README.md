@@ -1,78 +1,65 @@
-[![License](https://img.shields.io/github/license/codeandsolder/fast-socks5-fast.svg)](https://github.com/codeandsolder/fast-socks5-fast)
-[![crates.io](https://img.shields.io/crates/v/fast-socks5.svg)](https://crates.io/crates/fast-socks5)
-[![dependency status](https://deps.rs/repo/github/codeandsolder/fast-socks5-fast/status.svg)](https://deps.rs/repo/github/codeandsolder/fast-socks5-fast)
-[![Release](https://img.shields.io/github/release/codeandsolder/fast-socks5-fast.svg)](https://github.com/codeandsolder/fast-socks5-fast/releases)
+# fast-socks5-fast
 
-<h1 align="center">
-  <br>
-  <a href="https://anyip.io/">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/2582791e-0b95-402a-b8b0-cb7290236c05">
-      <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/fa0187ae-e322-4b7e-9770-eade281ff9d8">
-      <img alt="anyIP Logo" src="https://github.com/user-attachments/assets/fa0187ae-e322-4b7e-9770-eade281ff9d8" width="200">
-    </picture>
-  </a>
-  <br>
-</h1>
+A small, transport-independent **SOCKS5 server protocol** crate built on Tokio async I/O.
 
-<h4 align="center">Fast SOCKS5 server protocol library for Rust async (Tokio)</h4>
-
----
-
+This maintained fork implements the RFC 1928 state machine and RFC 1929
+username/password authentication. It deliberately **does not own the network
+stack**: DNS resolution, outbound TCP connections, BIND listeners, UDP
+associations, access rules, and data forwarding belong to the consumer.
 
 ## Features
 
-- An `async`/`.await` [SOCKS5](https://tools.ietf.org/html/rfc1928) implementation.
-- No **unsafe** code
-- Built on top of the [Tokio](https://tokio.rs/) runtime
-- Ultra lightweight and scalable
-- No system dependencies
-- Cross-platform
-- Infinitely extensible, explicit server API based on typestates for safety
-  - You control the request handling, the library only ensures you follow the proper protocol flow
-  - Domain targets remain unresolved so callers control DNS policy
-  - Can skip the authentication/handshake process (not RFC-compliant, for private use, to save on useless round-trips)
-  - Dialing and relay are caller-owned; the crate only handles SOCKS5 protocol state
-- Authentication methods:
-  - No-Auth method (`0x00`)
-  - Username/Password auth method (`0x02`)
-  - Custom auth methods can be implemented on the server side via the `AuthMethod` Trait
-    - Multiple auth methods with runtime negotiation can be supported, with fast *static* dispatch (enums can be generated with the `auth_method_enums` macro)
-- All SOCKS5 RFC errors (replies) should be mapped
-- `IPv4`, `IPv6`, and `Domains` types are supported
-- Exhaustive [`examples`](https://github.com/codeandsolder/fast-socks5-fast/tree/master/examples) are provided that can be run immediately:
-  - server
-  - custom_auth_server
+- No-authentication, username/password, and custom authentication methods
+- Compile-time authentication/command state transitions
+- CONNECT, BIND, and UDP ASSOCIATE request parsing
+- IPv4, IPv6, and unresolved domain-name destinations
+- SOCKS5 reply encoding with explicit failure codes
+- No unsafe code or platform-specific system dependencies
 
+## Using the protocol
 
-This library is maintained by [anyip.io](https://anyip.io/) a residential and mobile socks5 proxy provider.
+Wrap any `AsyncRead + AsyncWrite + Unpin + Send` stream. After negotiating
+authentication, the returned authenticated state can parse a command. The
+caller handles the command and sends its own success/failure reply.
 
-## Install
+```rust,no_run
+use fast_socks5::{
+    ReplyError, Socks5Command,
+    server::{Socks5ServerProtocol, SocksServerError},
+};
+use tokio::io::{AsyncRead, AsyncWrite};
 
-Open in [crates.io](https://crates.io/crates/fast-socks5).
+async fn handle<T>(stream: T) -> Result<(), SocksServerError>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let protocol = Socks5ServerProtocol::accept_no_auth(stream).await?;
+    let (protocol, command, _target) = protocol.read_command().await?;
 
-
-## Examples
-
-Please check [`examples`](https://github.com/codeandsolder/fast-socks5-fast/tree/master/examples) directory.
-
-```bash
-# Run server
-RUST_LOG=debug cargo run --example server -- --listen-addr 127.0.0.1:1337 password -u admin -p password
-
-# Test it with cURL
-curl -v --proxy socks5://admin:password@127.0.0.1:1337 https://ipapi.co/json/
+    match command {
+        Socks5Command::TcpConnect
+        | Socks5Command::TcpBind
+        | Socks5Command::UdpAssociate => {
+            // Replace this with a caller-owned transport implementation.
+            protocol.reply_error(&ReplyError::CommandNotSupported).await
+        }
+    }
+}
 ```
 
+For complete, runnable in-memory exchanges, see
+[`tests/server_protocol.rs`](tests/server_protocol.rs) and
+[`tests/protocol_edge_cases.rs`](tests/protocol_edge_cases.rs).
 
-## Inspired by
+## Contract and security
 
-Thanks to all these SOCKS5 projects
+- Domain targets stay unresolved; clients must choose their DNS policy.
+- Credentials are decoded as UTF-8 by the current username/password API.
+  The RFC's generic octet-field representation is not exposed as raw bytes.
+- The library does not log credential contents. SOCKS5 itself does not
+  encrypt the authentication exchange; use an appropriate secure transport.
+- Consumers must enforce connection timeouts, resource limits, and outbound
+  access-control policy.
 
-- https://github.com/sfackler/rust-socks/blob/master/src/v5.rs
-- https://github.com/shadowsocks/shadowsocks-rust/blob/master/src/relay/socks5.rs
-- https://github.com/ylxdzsw/v2socks/blob/master/src/socks.rs
-
-## Further Considerations
-
-- Implementation made with Tokio-codec https://github.com/yfaming/yimu-rs/blob/master/src/socks5.rs
+The crate retains the published package name `fast-socks5` and targets
+Rust 1.99 or newer.
