@@ -14,7 +14,7 @@ async fn parses_udp_associate_without_implementing_a_relay()
         let protocol = Socks5ServerProtocol::accept_no_auth(server).await?;
         let (protocol, command, target) = protocol.read_command().await?;
 
-        assert_eq!(command, Socks5Command::UDPAssociate);
+        assert_eq!(command, Socks5Command::UdpAssociate);
         assert_eq!(target, TargetAddr::Domain("example.com".to_owned(), 53));
 
         protocol.reply_error(&ReplyError::CommandNotSupported).await
@@ -48,7 +48,7 @@ async fn parses_tcp_connect_domain_target() -> Result<(), Box<dyn std::error::Er
         let protocol = Socks5ServerProtocol::accept_no_auth(server).await?;
         let (_protocol, command, target) = protocol.read_command().await?;
 
-        assert_eq!(command, Socks5Command::TCPConnect);
+        assert_eq!(command, Socks5Command::TcpConnect);
         assert_eq!(target, TargetAddr::Domain("example.com".to_owned(), 443));
         Ok::<_, SocksServerError>(())
     });
