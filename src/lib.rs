@@ -24,7 +24,7 @@
 //! confidentiality, authentication policy, connection timeouts, and outbound access rules.
 
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 // Internal I/O helper; public APIs use Tokio async I/O traits.
 macro_rules! read_exact {
     ($stream:expr, $array:expr) => {{
