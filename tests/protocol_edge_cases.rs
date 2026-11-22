@@ -715,3 +715,81 @@ async fn fragmented_maximum_credentials_leave_pipelined_request_and_payload() ->
         .map_err(|error| -> Box<dyn Error> { error })?;
     Ok(())
 }
+
+#[tokio::test]
+async fn truncated_domain_reports_the_failed_wire_field() -> TestResult {
+    use fast_socks5::util::target_addr::AddrError;
+    // Exercise every truncation position for the smallest field and several
+    // sizes spanning typical names, UTF-8 and SIMD/word-size boundaries.
+    for len in [1_u8, 2, 16, 63, 64, 127, 255] {
+        let mut body = vec![len];
+        body.extend(std::iter::repeat_n(b'a', usize::from(len)));
+        body.extend_from_slice(&443_u16.to_be_bytes());
+        for prefix in 0..body.len() {
+            let (mut client, server) = tokio::io::duplex(512);
+            client.write_all(&[5, 1, 0, 3]).await?;
+            client.write_all(&body[..prefix]).await?;
+            client.shutdown().await?;
+            let protocol = Socks5ServerProtocol::skip_auth_this_is_not_rfc_compliant(server);
+            let result = protocol.read_command().await;
+            let Err(SocksServerError::AddrError(error)) = result else {
+                return Err("expected a destination read error".into());
+            };
+            let source = match (prefix, error) {
+                (0, AddrError::DomainLenUnreadable(source)) => source,
+                (n, AddrError::DomainContentUnreadable(source)) if n <= usize::from(len) => source,
+                (n, AddrError::PortNumberUnreadable(source)) if n > usize::from(len) => source,
+                _ => return Err("wrong destination read error".into()),
+            };
+            assert_eq!(source.kind(), std::io::ErrorKind::UnexpectedEof);
+            let mut reply = [0; 10];
+            client.read_exact(&mut reply).await?;
+            assert_eq!(reply, [5, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn domain_destination_leaves_pipelined_payload_at_every_length() -> TestResult {
+    for len in 1_u8..=u8::MAX {
+        // Include an arbitrary valid multi-byte code point wherever it fits.
+        let mut domain = "a".repeat(usize::from(len));
+        if len >= 4 {
+            domain.replace_range(..4, "🌐");
+        }
+        let (mut client, server) = tokio::io::duplex(512);
+        client.write_all(&[5, 1, 0, 3, len]).await?;
+        client.write_all(domain.as_bytes()).await?;
+        client.write_all(&443_u16.to_be_bytes()).await?;
+        client.write_all(b"payload").await?;
+        let protocol = Socks5ServerProtocol::skip_auth_this_is_not_rfc_compliant(server);
+        let (proto, command, target) = protocol.read_command().await?;
+        assert_eq!(command, Socks5Command::TcpConnect);
+        assert_eq!(target, TargetAddr::Domain(domain, 443));
+        let mut stream = proto.reply_success(([0, 0, 0, 0], 0).into()).await?;
+        let mut payload = [0; 7];
+        stream.read_exact(&mut payload).await?;
+        assert_eq!(&payload, b"payload");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn command_error_replies_flush_each_wire_status() -> TestResult {
+    for code in 0_u8..=8 {
+        let Some(error) = ReplyError::from_u8(code) else {
+            return Err("missing RFC 1928 reply code".into());
+        };
+        let (mut client, server) = tokio::io::duplex(64);
+        client.write_all(&[5, 1, 0, 1, 127, 0, 0, 1, 0, 80]).await?;
+        let protocol =
+            Socks5ServerProtocol::skip_auth_this_is_not_rfc_compliant(BufStream::new(server));
+        let (protocol, _, _) = protocol.read_command().await?;
+        protocol.reply_error(&error).await?;
+        let mut reply = [0; 10];
+        client.read_exact(&mut reply).await?;
+        assert_eq!(reply, [5, code, 0, 1, 0, 0, 0, 0, 0, 0]);
+    }
+    Ok(())
+}

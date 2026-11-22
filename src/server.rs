@@ -3,7 +3,7 @@ use crate::{ReplyError, Socks5Command, consts};
 use log::{debug, error, trace};
 use std::io;
 use std::marker::PhantomData;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::simd::{Simd, cmp::SimdPartialEq};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -606,7 +606,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::CommandR
     ///
     /// Returns an error if the success reply cannot be written or flushed.
     pub async fn reply_success(mut self, sock_addr: SocketAddr) -> Result<T, SocksServerError> {
-        let (reply, reply_len) = new_reply(ReplyError::Succeeded, sock_addr);
+        let (reply, reply_len) = success_reply(sock_addr);
         self.inner
             .write_all(&reply[..reply_len])
             .await
@@ -624,20 +624,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::CommandR
     ///
     /// Returns an error if the failure reply cannot be written or flushed.
     pub async fn reply_error(mut self, error: &ReplyError) -> Result<(), SocksServerError> {
-        let (reply, reply_len) = new_reply(
-            *error,
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-        );
-        debug!("reply error to be written: {reply:?}");
-
-        self.inner
-            .write_all(&reply[..reply_len])
-            .await
-            .err_when("writing unsuccessful reply")?;
-
-        self.inner.flush().await.err_when("flushing auth reply")?;
-
-        Ok(())
+        write_error_reply(&mut self.inner, *error).await
     }
 }
 
@@ -684,11 +671,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenti
             return Err(SocksServerError::UnsupportedSocksVersion(version));
         }
 
-        let mut proto = Socks5ServerProtocol::new(self.inner);
-
         // Reject malformed headers before reading a potentially missing address body.
         let parsed = match (rsv, Socks5Command::from_u8(cmd)) {
-            (0, Some(cmd)) => read_address(&mut proto.inner, address_type)
+            (0, Some(cmd)) => read_address(&mut self.inner, address_type)
                 .await
                 .map(|target| (cmd, target))
                 .map_err(SocksServerError::from),
@@ -698,10 +683,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenti
         match parsed {
             Ok((cmd, target)) => {
                 trace!("Request target parsed");
-                Ok((proto, cmd, target))
+                Ok((Socks5ServerProtocol::new(self.inner), cmd, target))
             }
             Err(err) => {
-                if let Err(reply_err) = proto.reply_error(&err.to_reply_error()).await {
+                if let Err(reply_err) =
+                    write_error_reply(&mut self.inner, err.to_reply_error()).await
+                {
                     error!("extra error while reporting an error to the client: {reply_err}");
                 }
                 Err(err)
@@ -710,11 +697,37 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenti
     }
 }
 
+// A failure reply always has the unspecified IPv4 endpoint. Borrow the
+// original transport so it does not get moved into another suspended future.
+async fn write_error_reply<T: AsyncWrite + Unpin>(
+    stream: &mut T,
+    error: ReplyError,
+) -> Result<(), SocksServerError> {
+    let reply = [
+        consts::SOCKS5_VERSION,
+        error.as_u8(),
+        0,
+        consts::SOCKS5_ADDR_TYPE_IPV4,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ];
+    debug!("reply error to be written: {reply:?}");
+    stream
+        .write_all(&reply)
+        .await
+        .err_when("writing unsuccessful reply")?;
+    stream.flush().await.err_when("flushing auth reply")
+}
+
 /// Generate reply code according to the RFC.
-fn new_reply(error: ReplyError, sock_addr: SocketAddr) -> ([u8; 22], usize) {
+fn success_reply(sock_addr: SocketAddr) -> ([u8; 22], usize) {
     let mut reply = [0_u8; 22];
     reply[0] = consts::SOCKS5_VERSION;
-    reply[1] = error.as_u8();
+    reply[1] = consts::SOCKS5_REPLY_SUCCEEDED;
     reply[2] = 0;
 
     let len = match sock_addr {
