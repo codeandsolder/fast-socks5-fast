@@ -1,8 +1,8 @@
 use fast_socks5::{
     ReplyError, Socks5Command,
     server::{
-        NoAuthentication, NoAuthenticationImpl, PasswordAuthentication, Socks5ServerProtocol,
-        SocksServerError,
+        AuthMethod, NoAuthentication, NoAuthenticationImpl, PasswordAuthentication,
+        Socks5ServerProtocol, SocksServerError,
     },
     util::target_addr::TargetAddr,
 };
@@ -478,5 +478,45 @@ async fn empty_offered_method_list_is_rejected() -> TestResult {
         task.await?,
         Err(SocksServerError::AuthMethodUnacceptable(methods)) if methods.is_empty()
     ));
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct TestMethod(u8);
+
+impl<T> AuthMethod<T> for TestMethod {
+    type StartingState = u8;
+
+    fn method_id(self) -> u8 {
+        self.0
+    }
+
+    fn start(self, _inner: T) -> Self::StartingState {
+        self.0
+    }
+}
+
+#[tokio::test]
+async fn custom_method_negotiation_respects_server_order_and_rejects_reserved_id() -> TestResult {
+    for (offered, expected) in [(&[0xff, 0x80, 0x81][..], Some(0x81)), (&[0xff][..], None)] {
+        let (mut client, server) = tokio::io::duplex(256);
+        let task = tokio::spawn(async move {
+            Socks5ServerProtocol::start(server)
+                .negotiate_auth(&[TestMethod(0xff), TestMethod(0x81), TestMethod(0x80)])
+                .await
+        });
+        client.write_all(&[5, u8::try_from(offered.len())?]).await?;
+        client.write_all(offered).await?;
+        let mut reply = [0; 2];
+        client.read_exact(&mut reply).await?;
+        assert_eq!(reply, [5, expected.unwrap_or(0xff)]);
+        match (expected, task.await?) {
+            (Some(expected), Ok(actual)) => assert_eq!(actual, expected),
+            (None, Err(SocksServerError::AuthMethodUnacceptable(actual))) => {
+                assert_eq!(actual, offered)
+            }
+            _ => return Err("unexpected custom method negotiation result".into()),
+        }
+    }
     Ok(())
 }

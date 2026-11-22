@@ -48,7 +48,7 @@ pub enum SocksServerError {
 
 impl SocksServerError {
     /// Map this error to a protocol reply status.
-    #[must_use]
+    #[must_use = "the returned status is needed to report the protocol error"]
     pub const fn to_reply_error(&self) -> ReplyError {
         match self {
             Self::UnknownCommand(_) => ReplyError::CommandNotSupported,
@@ -411,7 +411,7 @@ auth_method_enums! {
 
 impl StandardAuthentication {
     /// Return a slice containing either both supported methods or only `PasswordAuthentication`.
-    #[must_use]
+    #[must_use = "the returned slice determines which authentication methods may be negotiated"]
     pub const fn allow_no_auth(allow: bool) -> &'static [Self] {
         if allow {
             &[
@@ -430,7 +430,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::O
     /// Negotiate an authentication method from a list of supported ones and initialize it.
     ///
     /// Internally, this reads the list of authentication methods provided by the client, and
-    /// picks the first one for which there exists an implementation in `server_methods`.
+    /// selects the first server-preferred method offered by the client.
+    /// The reserved rejection octet 0xff is never a selectable method.
     ///
     /// If none of the auth methods requested by the client are in `server_methods`,
     /// returns a `SocksServerError::AuthMethodUnacceptable`.
@@ -451,52 +452,58 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::O
             return Err(SocksServerError::UnsupportedSocksVersion(version));
         }
 
-        // {METHODS available from the client}
-        // eg. (non-auth) {0, 1}
-        // eg. (auth)     {0, 1, 2}
-        // SOCKS5 encodes NMETHODS in one octet. The offered list fits in a
-        // fixed stack buffer, avoiding an allocation for every connection.
-        // Preserve the offered bytes in the error only on negotiation failure.
-        let mut offered = [0u8; u8::MAX as usize];
-        let methods = &mut offered[..usize::from(methods_len)];
-        self.inner
-            .read_exact(methods)
-            .await
-            .err_when("reading methods")?;
-        debug!("methods supported sent by the client: {methods:?}");
+        // Scope the receive buffer to selection. Successful negotiations do
+        // not keep the 255-byte offer buffer alive across reply/flush awaits.
+        let selection = {
+            let mut offered = [0_u8; u8::MAX as usize];
+            let methods = &mut offered[..usize::from(methods_len)];
+            self.inner
+                .read_exact(methods)
+                .await
+                .err_when("reading methods")?;
+            debug!("methods supported sent by the client: {methods:?}");
 
-        // server_methods order matter!
-        // the server could choose to prioritize methods
-        for server_method in server_methods {
-            for client_method_id in methods.iter() {
-                if server_method.method_id() == *client_method_id {
-                    debug!("Reply with method {}", *client_method_id);
-                    self.inner
-                        .write_all(&[consts::SOCKS5_VERSION, *client_method_id])
-                        .await
-                        .err_when("replying with auth method")?;
-                    self.inner
-                        .flush()
-                        .await
-                        .err_when("flushing selected auth method")?;
-                    return Ok(server_method.start(self.inner));
-                }
+            // Preference is server order. Evaluate each custom method ID once;
+            // 0xff is a rejection status, never an authentication method.
+            server_methods
+                .iter()
+                .find_map(|&method| {
+                    let id = method.method_id();
+                    (id != consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE && methods.contains(&id))
+                        .then_some((method, id))
+                })
+                .ok_or_else(|| methods.to_vec())
+        };
+
+        match selection {
+            Ok((method, id)) => {
+                debug!("Reply with method {id}");
+                self.inner
+                    .write_all(&[consts::SOCKS5_VERSION, id])
+                    .await
+                    .err_when("replying with auth method")?;
+                self.inner
+                    .flush()
+                    .await
+                    .err_when("flushing selected auth method")?;
+                Ok(method.start(self.inner))
+            }
+            Err(offers) => {
+                debug!("No auth method supported by both client and server, reply with (0xff)");
+                self.inner
+                    .write_all(&[
+                        consts::SOCKS5_VERSION,
+                        consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE,
+                    ])
+                    .await
+                    .err_when("replying with method not acceptable")?;
+                self.inner
+                    .flush()
+                    .await
+                    .err_when("flushing rejected methods")?;
+                Err(SocksServerError::AuthMethodUnacceptable(offers))
             }
         }
-
-        debug!("No auth method supported by both client and server, reply with (0xff)");
-        self.inner
-            .write_all(&[
-                consts::SOCKS5_VERSION,
-                consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE,
-            ])
-            .await
-            .err_when("replying with method not acceptable")?;
-        self.inner
-            .flush()
-            .await
-            .err_when("flushing rejected methods")?;
-        Err(SocksServerError::AuthMethodUnacceptable(methods.to_vec()))
     }
 }
 
