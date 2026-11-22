@@ -95,7 +95,7 @@ async fn rejects_invalid_password_subnegotiation_version() -> TestResult {
         let auth = Socks5ServerProtocol::start(server)
             .negotiate_auth(&[PasswordAuthentication])
             .await?;
-        let _ = auth.read_username_password().await?;
+        let _ = auth.read_username_password(|_, _| ()).await?;
         Ok::<(), SocksServerError>(())
     });
     client.write_all(&[5, 1, 2]).await?;
@@ -337,9 +337,12 @@ async fn password_parser_preserves_255_octets_without_text_conversion() -> TestR
         let auth = Socks5ServerProtocol::start(server)
             .negotiate_auth(&[PasswordAuthentication])
             .await?;
-        let (user, pass, auth) = auth.read_username_password().await?;
-        assert_eq!(user, username);
-        assert_eq!(pass, password);
+        let ((), auth) = auth
+            .read_username_password(|user, pass| {
+                assert_eq!(user, username);
+                assert_eq!(pass, password);
+            })
+            .await?;
         let _ = auth.accept().await?;
         Ok::<(), SocksServerError>(())
     });
@@ -624,5 +627,91 @@ async fn large_custom_method_sets_preserve_server_preference_and_rejection_bytes
             _ => return Err("unexpected indexed negotiation result".into()),
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn password_verifier_is_not_called_for_any_truncated_frame() -> TestResult {
+    let fields = [1, 3, 0, 0xff, 0xc3, 4, 0xf0, 0, 0x80, 0xff];
+    for prefix_len in 0..fields.len() {
+        let (mut client, server) = tokio::io::duplex(32);
+        let visited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let checked = visited.clone();
+        let task = tokio::spawn(async move {
+            Socks5ServerProtocol::accept_password_auth(server, |_, _| {
+                checked.store(true, std::sync::atomic::Ordering::Relaxed);
+                true
+            })
+            .await
+        });
+        client.write_all(&[5, 1, 2]).await?;
+        let mut selection = [0; 2];
+        client.read_exact(&mut selection).await?;
+        assert_eq!(selection, [5, 2]);
+        client.write_all(&fields[..prefix_len]).await?;
+        client.shutdown().await?;
+        let result = timeout(Duration::from_secs(1), task).await??;
+        assert!(!visited.load(std::sync::atomic::Ordering::Relaxed));
+        let Err(SocksServerError::Io { source, context }) = result else {
+            return Err("expected an I/O error for truncated credential frame".into());
+        };
+        assert_eq!(source.kind(), std::io::ErrorKind::UnexpectedEof);
+        let expected = match prefix_len {
+            0..=1 => "reading user len",
+            2..=4 => "reading username",
+            5 => "reading password len",
+            _ => "reading password",
+        };
+        assert_eq!(context, expected);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn fragmented_maximum_credentials_leave_pipelined_request_and_payload() -> TestResult {
+    let (mut client, server) = tokio::io::duplex(1);
+    let task = tokio::spawn(async move {
+        let protocol = Socks5ServerProtocol::accept_password_auth(server, |user, pass| {
+            user.iter().copied().eq(0..=254) && pass.iter().copied().eq(1..=255)
+        })
+        .await?;
+        let (protocol, command, target) = protocol.read_command().await?;
+        assert_eq!(command, Socks5Command::TcpConnect);
+        assert_eq!(
+            target,
+            TargetAddr::Ip(SocketAddr::from(([127, 0, 0, 1], 80)))
+        );
+        let mut stream = protocol
+            .reply_success(SocketAddr::from(([127, 0, 0, 1], 1080)))
+            .await?;
+        let mut payload = [0; 3];
+        stream.read_exact(&mut payload).await?;
+        assert_eq!(payload, [0xff, 0, 0x7f]);
+        Ok::<(), Box<dyn Error + Send + Sync>>(())
+    });
+    timeout(Duration::from_secs(1), client.write_all(&[5, 1, 2])).await??;
+    let mut selection = [0; 2];
+    timeout(Duration::from_secs(1), client.read_exact(&mut selection)).await??;
+    assert_eq!(selection, [5, 2]);
+    let mut credentials = vec![1, 255];
+    credentials.extend(0..=254);
+    credentials.push(255);
+    credentials.extend(1..=255);
+    timeout(Duration::from_secs(5), client.write_all(&credentials)).await??;
+    let mut status = [0; 2];
+    timeout(Duration::from_secs(1), client.read_exact(&mut status)).await??;
+    assert_eq!(status, [1, 0]);
+    timeout(
+        Duration::from_secs(1),
+        client.write_all(&[5, 1, 0, 1, 127, 0, 0, 1, 0, 80]),
+    )
+    .await??;
+    let mut response = [0; 10];
+    timeout(Duration::from_secs(1), client.read_exact(&mut response)).await??;
+    assert_eq!(response, [5, 0, 0, 1, 127, 0, 0, 1, 4, 56]);
+    timeout(Duration::from_secs(1), client.write_all(&[0xff, 0, 0x7f])).await??;
+    timeout(Duration::from_secs(1), task)
+        .await??
+        .map_err(|error| -> Box<dyn Error> { error })?;
     Ok(())
 }
