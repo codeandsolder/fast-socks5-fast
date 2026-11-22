@@ -18,7 +18,7 @@ associations, access rules, and data forwarding belong to the consumer.
 
 ## Using the protocol
 
-Wrap any `AsyncRead + AsyncWrite + Unpin + Send` stream. After negotiating
+Wrap any `AsyncRead + AsyncWrite + Unpin` stream. After negotiating
 authentication, the returned authenticated state can parse a command. The
 caller handles the command and sends its own success/failure reply.
 
@@ -58,6 +58,8 @@ For complete, runnable in-memory exchanges, see
   necessarily UTF-8. `accept_password_auth` passes borrowed `&[u8]` fields
   to the verifier; lower-level `read_username_password` invokes a one-shot
   callback with borrowed octets and returns its result and the reply state.
+  Call `finish(accepted)` on that state with an explicit boolean decision;
+  rejection is flushed and returns `AuthenticationRejected`.
   Neither parser allocates credential buffers. Callers may compare with
   `expected.as_bytes()`, decode explicitly, or copy if ownership is needed.
 - The library does not log credential contents. SOCKS5 itself does not
