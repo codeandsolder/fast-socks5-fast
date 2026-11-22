@@ -142,20 +142,16 @@ impl<T> Socks5ServerProtocol<T, states::Authenticated> {
     /// # Errors
     ///
     /// Returns an error if negotiation or credential parsing fails, or if `check` rejects the credentials.
-    pub async fn accept_password_auth<F>(inner: T, mut check: F) -> Result<Self, SocksServerError>
+    pub async fn accept_password_auth<F>(inner: T, check: F) -> Result<Self, SocksServerError>
     where
         T: AsyncWrite + AsyncRead + Unpin + Send,
-        F: FnMut(&[u8], &[u8]) -> bool + Send,
+        F: FnOnce(&[u8], &[u8]) -> bool + Send,
     {
-        let (user, pass, auth) = Socks5ServerProtocol::start(inner)
+        let (accepted, auth) = Socks5ServerProtocol::start(inner)
             .negotiate_auth(&[PasswordAuthentication])
             .await?
-            .read_username_password()
+            .read_username_password(check)
             .await?;
-        let accepted = check(&user, &pass);
-        // Neither credential buffer needs to survive the verifier, particularly
-        // across the next network I/O await.
-        drop((user, pass));
         if accepted {
             Ok(auth.accept().await?.finish_auth())
         } else {
@@ -254,22 +250,21 @@ impl<T, S> PasswordAuthenticationImpl<T, S> {
 }
 
 impl<T: AsyncRead + Unpin> PasswordAuthenticationImpl<T, password_states::Started> {
-    /// Handle the username and password sent by the client.
+    /// Read the username and password and pass their borrowed octets to the verifier.
+    ///
+    /// Returns the verifier's result and the state awaiting an authentication reply.
+    /// Credential bytes are opaque; RFC 1929 does not define a character encoding.
+    /// The verifier may copy the bytes if ownership is needed.
     ///
     /// # Errors
-    ///
     /// Returns an error if the RFC 1929 credential frame is malformed, empty, or cannot be read.
-    /// Credentials are returned as opaque octets; RFC 1929 does not define a character encoding.
-    pub async fn read_username_password(
+    pub async fn read_username_password<R, F>(
         self,
-    ) -> Result<
-        (
-            Vec<u8>,
-            Vec<u8>,
-            PasswordAuthenticationImpl<T, password_states::Received>,
-        ),
-        SocksServerError,
-    > {
+        verify: F,
+    ) -> Result<(R, PasswordAuthenticationImpl<T, password_states::Received>), SocksServerError>
+    where
+        F: FnOnce(&[u8], &[u8]) -> R,
+    {
         let mut socket = self.inner;
         trace!("PasswordAuthenticationStarted: read_username_password()");
         let mut header = [0; 2];
@@ -283,32 +278,33 @@ impl<T: AsyncRead + Unpin> PasswordAuthenticationImpl<T, password_states::Starte
             return Err(SocksServerError::UnsupportedPasswordVersion(version));
         }
 
-        if user_len < 1 {
+        if user_len == 0 {
             return Err(SocksServerError::EmptyUsername);
         }
 
-        let mut username = vec![0; usize::from(user_len)];
+        // Both RFC 1929 fields are bounded by a single length octet.
+        let mut bytes = [0; 2 * u8::MAX as usize];
+        let user_len = usize::from(user_len);
         socket
-            .read_exact(&mut username)
+            .read_exact(&mut bytes[..user_len])
             .await
             .err_when("reading username")?;
-        // Credential bytes are never logged.
 
         let pass_len = socket.read_u8().await.err_when("reading password len")?;
         trace!("Password authentication password field length: {pass_len}");
 
-        if pass_len < 1 {
+        if pass_len == 0 {
             return Err(SocksServerError::EmptyPassword);
         }
 
-        let mut password = vec![0; usize::from(pass_len)];
+        let end = user_len + usize::from(pass_len);
         socket
-            .read_exact(&mut password)
+            .read_exact(&mut bytes[user_len..end])
             .await
             .err_when("reading password")?;
-        // The password must never be logged.
 
-        Ok((username, password, PasswordAuthenticationImpl::new(socket)))
+        let result = verify(&bytes[..user_len], &bytes[user_len..end]);
+        Ok((result, PasswordAuthenticationImpl::new(socket)))
     }
 }
 

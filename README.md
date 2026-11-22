@@ -56,8 +56,10 @@ For complete, runnable in-memory exchanges, see
 - Domain targets stay unresolved; clients must choose their DNS policy.
 - RFC 1929 usernames and passwords are opaque 1–255-byte fields, not
   necessarily UTF-8. `accept_password_auth` passes borrowed `&[u8]` fields
-  to the verifier; lower-level `read_username_password` returns `Vec<u8>`
-  fields. Callers may compare with `expected.as_bytes()` or decode explicitly.
+  to the verifier; lower-level `read_username_password` invokes a one-shot
+  callback with borrowed octets and returns its result and the reply state.
+  Neither parser allocates credential buffers. Callers may compare with
+  `expected.as_bytes()`, decode explicitly, or copy if ownership is needed.
 - The library does not log credential contents. SOCKS5 itself does not
   encrypt the authentication exchange; use an appropriate secure transport.
 - Consumers must enforce connection timeouts, resource limits, and outbound
