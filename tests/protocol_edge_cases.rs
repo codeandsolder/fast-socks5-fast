@@ -343,7 +343,7 @@ async fn password_parser_preserves_255_octets_without_text_conversion() -> TestR
                 assert_eq!(pass, password);
             })
             .await?;
-        let _ = auth.accept().await?;
+        let _ = auth.finish(true).await?;
         Ok::<(), SocksServerError>(())
     });
     client.write_all(&[5, 1, 2]).await?;
@@ -791,5 +791,209 @@ async fn command_error_replies_flush_each_wire_status() -> TestResult {
         client.read_exact(&mut reply).await?;
         assert_eq!(reply, [5, code, 0, 1, 0, 0, 0, 0, 0, 0]);
     }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum Fault {
+    Never,
+    Write(usize),
+    Flush(usize),
+}
+
+struct AuthReplyFaultStream<'a> {
+    input: &'a [u8],
+    output: &'a std::cell::RefCell<Vec<u8>>,
+    fault: Fault,
+    writes: usize,
+    flushes: usize,
+}
+
+impl AuthReplyFaultStream<'_> {
+    const fn new<'a>(
+        input: &'a [u8],
+        output: &'a std::cell::RefCell<Vec<u8>>,
+        fault: Fault,
+    ) -> AuthReplyFaultStream<'a> {
+        AuthReplyFaultStream {
+            input,
+            output,
+            fault,
+            writes: 0,
+            flushes: 0,
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for AuthReplyFaultStream<'_> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let count = self.input.len().min(buf.remaining());
+        buf.put_slice(&self.input[..count]);
+        self.input = &self.input[count..];
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl tokio::io::AsyncWrite for AuthReplyFaultStream<'_> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if matches!(self.fault, Fault::Write(index) if index == self.writes) {
+            return std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+        }
+        self.writes += 1;
+        self.output.borrow_mut().extend_from_slice(bytes);
+        std::task::Poll::Ready(Ok(bytes.len()))
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if matches!(self.fault, Fault::Flush(index) if index == self.flushes) {
+            return std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+        }
+        self.flushes += 1;
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn authentication_reply_io_error_context_is_stage_specific() -> TestResult {
+    for (method, status, context_write, context_flush) in [
+        (
+            0,
+            0,
+            "replying with auth method",
+            "flushing selected auth method",
+        ),
+        (
+            2,
+            0xff,
+            "replying with method not acceptable",
+            "flushing rejected methods",
+        ),
+    ] {
+        for (fault, context, expected) in [
+            (Fault::Write(0), context_write, &[][..]),
+            (Fault::Flush(0), context_flush, &[5, status][..]),
+        ] {
+            let output = std::cell::RefCell::new(Vec::new());
+            let input = [5, 1, method];
+            let stream = AuthReplyFaultStream::new(&input, &output, fault);
+            let Err(SocksServerError::Io {
+                source,
+                context: actual,
+            }) = Socks5ServerProtocol::accept_no_auth(stream).await
+            else {
+                return Err("expected method reply I/O error".into());
+            };
+            assert_eq!(source.kind(), std::io::ErrorKind::BrokenPipe);
+            assert_eq!(context, actual);
+            assert_eq!(output.borrow().as_slice(), expected);
+        }
+    }
+    for (accepted, status, context_write, context_flush) in [
+        (true, 0, "replying auth success", "flushing auth success"),
+        (
+            false,
+            1,
+            "replying with auth method not acceptable",
+            "flushing auth failure",
+        ),
+    ] {
+        for (fault, context, expected) in [
+            (Fault::Write(1), context_write, &[5, 2][..]),
+            (Fault::Flush(1), context_flush, &[5, 2, 1, status][..]),
+        ] {
+            let output = std::cell::RefCell::new(Vec::new());
+            let stream = AuthReplyFaultStream::new(&[5, 1, 2, 1, 1, b'u', 1, b'p'], &output, fault);
+            let Err(SocksServerError::Io {
+                source,
+                context: actual,
+            }) = Socks5ServerProtocol::accept_password_auth(stream, |user, pass| {
+                assert_eq!(user, b"u");
+                assert_eq!(pass, b"p");
+                accepted
+            })
+            .await
+            else {
+                return Err("expected password reply I/O error".into());
+            };
+            assert_eq!(source.kind(), std::io::ErrorKind::BrokenPipe);
+            assert_eq!(context, actual);
+            assert_eq!(output.borrow().as_slice(), expected);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct LocalAuthentication<'a>(&'a std::cell::Cell<usize>);
+
+impl<'io> AuthMethod<AuthReplyFaultStream<'io>> for LocalAuthentication<'_> {
+    type StartingState = AuthReplyFaultStream<'io>;
+
+    fn method_id(self) -> u8 {
+        self.0.set(self.0.get() + 1);
+        0x80
+    }
+
+    fn start(self, inner: AuthReplyFaultStream<'io>) -> Self::StartingState {
+        assert_eq!(inner.flushes, 1);
+        inner
+    }
+}
+
+#[tokio::test]
+async fn local_transport_and_method_metadata_need_not_cross_threads() -> TestResult {
+    let calls = std::cell::Cell::new(0);
+    let output = std::cell::RefCell::new(Vec::new());
+    let stream = AuthReplyFaultStream::new(&[5, 1, 0x80], &output, Fault::Never);
+    let stream = Socks5ServerProtocol::start(stream)
+        .negotiate_auth(&[LocalAuthentication(&calls)])
+        .await?;
+    assert!(stream.input.is_empty());
+    assert_eq!(calls.get(), 1);
+    assert_eq!(output.borrow().as_slice(), &[5, 0x80]);
+
+    let output = std::cell::RefCell::new(Vec::new());
+    let stream = AuthReplyFaultStream::new(&[5, 1, 2, 1, 1, b'u', 1, b'p'], &output, Fault::Never);
+    let expected = std::rc::Rc::new([b'u', b'p']);
+    let _ = Socks5ServerProtocol::accept_password_auth(stream, move |user, pass| {
+        let expected = expected;
+        user == &expected[..1] && pass == &expected[1..]
+    })
+    .await?;
+    assert_eq!(output.borrow().as_slice(), &[5, 2, 1, 0]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_low_level_password_rejection_flushes_before_returning_error() -> TestResult {
+    let output = std::cell::RefCell::new(Vec::new());
+    let stream = AuthReplyFaultStream::new(&[5, 1, 2, 1, 1, b'u', 1, b'p'], &output, Fault::Never);
+    let auth = Socks5ServerProtocol::start(BufStream::new(stream))
+        .negotiate_auth(&[PasswordAuthentication])
+        .await?;
+    let (accepted, auth) = auth.read_username_password(|_, _| false).await?;
+    assert!(matches!(
+        auth.finish(accepted).await,
+        Err(SocksServerError::AuthenticationRejected)
+    ));
+    assert_eq!(output.borrow().as_slice(), &[5, 2, 1, 1]);
     Ok(())
 }

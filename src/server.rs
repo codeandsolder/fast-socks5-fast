@@ -121,14 +121,15 @@ impl<T> Socks5ServerProtocol<T, states::Authenticated> {
     /// # Errors
     ///
     /// Returns an error if the client sends an invalid handshake or the negotiation I/O fails.
-    pub async fn accept_no_auth(inner: T) -> Result<Self, SocksServerError>
+    pub async fn accept_no_auth(mut inner: T) -> Result<Self, SocksServerError>
     where
-        T: AsyncWrite + AsyncRead + Unpin + Send,
+        T: AsyncWrite + AsyncRead + Unpin,
     {
-        Ok(Socks5ServerProtocol::start(inner)
+        // Keep the owned transport in this future; only borrow it for negotiation.
+        let _ = Socks5ServerProtocol::start(&mut inner)
             .negotiate_auth(&[NoAuthentication])
-            .await?
-            .finish_auth())
+            .await?;
+        Ok(Self::new(inner))
     }
 
     /// Handle the SOCKS5 auth negotiation supporting only the `PasswordAuthentication` method,
@@ -142,22 +143,19 @@ impl<T> Socks5ServerProtocol<T, states::Authenticated> {
     /// # Errors
     ///
     /// Returns an error if negotiation or credential parsing fails, or if `check` rejects the credentials.
-    pub async fn accept_password_auth<F>(inner: T, check: F) -> Result<Self, SocksServerError>
+    pub async fn accept_password_auth<F>(mut inner: T, check: F) -> Result<Self, SocksServerError>
     where
-        T: AsyncWrite + AsyncRead + Unpin + Send,
-        F: FnOnce(&[u8], &[u8]) -> bool + Send,
+        T: AsyncWrite + AsyncRead + Unpin,
+        F: FnOnce(&[u8], &[u8]) -> bool,
     {
-        let (accepted, auth) = Socks5ServerProtocol::start(inner)
+        // Retain ownership until authentication has successfully flushed.
+        let (accepted, auth) = Socks5ServerProtocol::start(&mut inner)
             .negotiate_auth(&[PasswordAuthentication])
             .await?
             .read_username_password(check)
             .await?;
-        if accepted {
-            Ok(auth.accept().await?.finish_auth())
-        } else {
-            auth.reject().await?;
-            Err(SocksServerError::AuthenticationRejected)
-        }
+        let _ = auth.finish(accepted).await?;
+        Ok(Self::new(inner))
     }
 }
 
@@ -309,38 +307,43 @@ impl<T: AsyncRead + Unpin> PasswordAuthenticationImpl<T, password_states::Starte
 }
 
 impl<T: AsyncWrite + Unpin> PasswordAuthenticationImpl<T, password_states::Received> {
-    /// Notify the client with a "SUCCEEDED" reply and proceed to finish the authentication.
+    /// Send the RFC 1929 authentication result and finish the state transition.
+    ///
+    /// Only an explicit `true` decision produces a successful authentication state.
     ///
     /// # Errors
-    ///
-    /// Returns an error if the authentication success response cannot be written.
-    pub async fn accept(
+    /// Returns `AuthenticationRejected` after flushing a rejection, or an I/O error
+    /// if the result cannot be written or flushed.
+    pub async fn finish(
         mut self,
+        accepted: bool,
     ) -> Result<PasswordAuthenticationImpl<T, password_states::Finished>, SocksServerError> {
+        let status = if accepted {
+            consts::SOCKS5_AUTH_STATUS_SUCCESS
+        } else {
+            consts::SOCKS5_AUTH_STATUS_FAILURE
+        };
         self.inner
-            .write_all(&[1, consts::SOCKS5_AUTH_STATUS_SUCCESS])
+            .write_all(&[1, status])
             .await
-            .err_when("replying auth success")?;
-        self.inner.flush().await.err_when("flushing auth success")?;
+            .err_when(if accepted {
+                "replying auth success"
+            } else {
+                "replying with auth method not acceptable"
+            })?;
+        self.inner.flush().await.err_when(if accepted {
+            "flushing auth success"
+        } else {
+            "flushing auth failure"
+        })?;
 
-        debug!("Password authentication accepted.");
-        Ok(PasswordAuthenticationImpl::new(self.inner))
-    }
-
-    /// Notify the client with a "`NOT_ACCEPTABLE`" reply and drop the socket.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the authentication rejection response cannot be written.
-    pub async fn reject(mut self) -> Result<(), SocksServerError> {
-        self.inner
-            .write_all(&[1, consts::SOCKS5_AUTH_STATUS_FAILURE])
-            .await
-            .err_when("replying with auth method not acceptable")?;
-        self.inner.flush().await.err_when("flushing auth failure")?;
-
-        debug!("Password authentication rejected.");
-        Ok(())
+        if accepted {
+            debug!("Password authentication accepted.");
+            Ok(PasswordAuthenticationImpl::new(self.inner))
+        } else {
+            debug!("Password authentication rejected.");
+            Err(SocksServerError::AuthenticationRejected)
+        }
     }
 }
 
@@ -520,7 +523,7 @@ fn select_indexed<T, M: AuthMethod<T>>(server: &[M], offered: &[u8]) -> Option<(
     })
 }
 
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::Opened> {
+impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Opened> {
     /// Negotiate an authentication method from a list of supported ones and initialize it.
     ///
     /// Internally, this reads the list of authentication methods provided by the client, and
@@ -533,7 +536,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::O
     /// # Errors
     ///
     /// Returns an error for an invalid SOCKS version, no mutually supported method, or handshake I/O failure.
-    pub async fn negotiate_auth<M: AuthMethod<T> + Sync>(
+    pub async fn negotiate_auth<M: AuthMethod<T>>(
         mut self,
         server_methods: &[M],
     ) -> Result<M::StartingState, SocksServerError> {
@@ -598,7 +601,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::O
     }
 }
 
-impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::CommandRead> {
+impl<T: AsyncWrite + Unpin> Socks5ServerProtocol<T, states::CommandRead> {
     /// Reply success to the client according to the RFC.
     /// This consumes the wrapper as after this message actual proxying should begin.
     ///
