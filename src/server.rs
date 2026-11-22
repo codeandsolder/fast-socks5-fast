@@ -1,5 +1,5 @@
 use crate::util::target_addr::{AddrError, TargetAddr, read_address};
-use crate::{ReplyError, Socks5Command, consts, read_exact};
+use crate::{ReplyError, Socks5Command, consts};
 use log::{debug, error, trace};
 use std::io;
 use std::marker::PhantomData;
@@ -272,9 +272,12 @@ impl<T: AsyncRead + Unpin> PasswordAuthenticationImpl<T, password_states::Starte
     > {
         let mut socket = self.inner;
         trace!("PasswordAuthenticationStarted: read_username_password()");
-        let [version, user_len] = read_exact(&mut socket, [0u8; 2])
+        let mut header = [0; 2];
+        socket
+            .read_exact(&mut header)
             .await
             .err_when("reading user len")?;
+        let [version, user_len] = header;
         trace!("Password authentication username field length: {user_len}");
         if version != 1 {
             return Err(SocksServerError::UnsupportedPasswordVersion(version));
@@ -284,21 +287,23 @@ impl<T: AsyncRead + Unpin> PasswordAuthenticationImpl<T, password_states::Starte
             return Err(SocksServerError::EmptyUsername);
         }
 
-        let username = read_exact(&mut socket, vec![0u8; usize::from(user_len)])
+        let mut username = vec![0; usize::from(user_len)];
+        socket
+            .read_exact(&mut username)
             .await
             .err_when("reading username")?;
         // Credential bytes are never logged.
 
-        let [pass_len] = read_exact(&mut socket, [0u8; 1])
-            .await
-            .err_when("reading password len")?;
+        let pass_len = socket.read_u8().await.err_when("reading password len")?;
         trace!("Password authentication password field length: {pass_len}");
 
         if pass_len < 1 {
             return Err(SocksServerError::EmptyPassword);
         }
 
-        let password = read_exact(&mut socket, vec![0u8; usize::from(pass_len)])
+        let mut password = vec![0; usize::from(pass_len)];
+        socket
+            .read_exact(&mut password)
             .await
             .err_when("reading password")?;
         // The password must never be logged.
@@ -435,6 +440,7 @@ impl StandardAuthentication {
 
 // A normal greeting carries only a handful of methods. Longer offers can use
 // baseline-width portable SIMD, including an overlapping final load for a tail.
+#[inline]
 fn offered_contains(methods: &[u8], id: u8) -> bool {
     if methods.len() < u8x16::LEN {
         return methods.contains(&id);
@@ -468,9 +474,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::O
         server_methods: &[M],
     ) -> Result<M::StartingState, SocksServerError> {
         trace!("Socks5ServerProtocol: negotiate_auth()");
-        let [version, methods_len] = read_exact(&mut self.inner, [0u8; 2])
+        let mut header = [0; 2];
+        self.inner
+            .read_exact(&mut header)
             .await
             .err_when("reading methods")?;
+        let [version, methods_len] = header;
         debug!("Handshake headers: [version: {version}, methods len: {methods_len}]");
 
         if version != consts::SOCKS5_VERSION {
@@ -605,9 +614,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenti
         ),
         SocksServerError,
     > {
-        let [version, cmd, rsv, address_type] = read_exact(&mut self.inner, [0u8; 4])
+        let mut header = [0; 4];
+        self.inner
+            .read_exact(&mut header)
             .await
             .err_when("reading command")?;
+        let [version, cmd, rsv, address_type] = header;
         debug!(
             "Request: [version: {version}, command: {cmd}, reserved: {rsv}, address_type: {address_type}]",
         );
@@ -619,15 +631,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenti
         let mut proto = Socks5ServerProtocol::new(self.inner);
 
         // Reject malformed headers before reading a potentially missing address body.
-        let parsed = async {
-            if rsv != 0 {
-                return Err(SocksServerError::InvalidReservedByte(rsv));
-            }
-            let cmd = Socks5Command::from_u8(cmd).ok_or(SocksServerError::UnknownCommand(cmd))?;
-            let target = read_address(&mut proto.inner, address_type).await?;
-            Ok((cmd, target))
-        }
-        .await;
+        let parsed = match (rsv, Socks5Command::from_u8(cmd)) {
+            (0, Some(cmd)) => read_address(&mut proto.inner, address_type)
+                .await
+                .map(|target| (cmd, target))
+                .map_err(SocksServerError::from),
+            (0, None) => Err(SocksServerError::UnknownCommand(cmd)),
+            (invalid, _) => Err(SocksServerError::InvalidReservedByte(invalid)),
+        };
         match parsed {
             Ok((cmd, target)) => {
                 trace!("Request target parsed");
@@ -705,25 +716,27 @@ mod tests {
     // The small offer is the common case; the longest offer probes the stress case.
     #[bench]
     fn short_offer_scalar(b: &mut Bencher) {
-        b.iter(|| black_box([0_u8, 2]).contains(&black_box(2)));
+        let methods = [0_u8, 2];
+        b.iter(|| black_box(methods.as_slice()).contains(&black_box(2)));
     }
 
     #[bench]
     fn short_offer_current(b: &mut Bencher) {
-        b.iter(|| offered_contains(&black_box([0_u8, 2]), black_box(2)));
+        let methods = [0_u8, 2];
+        b.iter(|| offered_contains(black_box(methods.as_slice()), black_box(2)));
     }
 
     #[bench]
     fn full_offer_scalar(b: &mut Bencher) {
         let mut methods = [0x77; u8::MAX as usize];
         methods[usize::from(u8::MAX) - 1] = 2;
-        b.iter(|| black_box(&methods).contains(&black_box(2)));
+        b.iter(|| black_box(methods.as_slice()).contains(&black_box(2)));
     }
 
     #[bench]
     fn full_offer_current(b: &mut Bencher) {
         let mut methods = [0x77; u8::MAX as usize];
         methods[usize::from(u8::MAX) - 1] = 2;
-        b.iter(|| offered_contains(black_box(&methods), black_box(2)));
+        b.iter(|| offered_contains(black_box(methods.as_slice()), black_box(2)));
     }
 }

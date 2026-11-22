@@ -1,22 +1,22 @@
 use crate::ReplyError;
-use crate::{consts, read_exact};
+use crate::consts;
 use log::debug;
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[derive(thiserror::Error, Debug)]
 /// Errors while decoding a SOCKS5 destination address.
 pub enum AddrError {
-    #[error("cannot read IPv4: {0}")]
-    /// IPv4 octets could not be read.
+    #[error("cannot read IPv4 address and port: {0}")]
+    /// IPv4 destination body (address and port) could not be read.
     Ipv4Unreadable(#[source] io::Error),
-    #[error("cannot read IPv6: {0}")]
-    /// IPv6 octets could not be read.
+    #[error("cannot read IPv6 address and port: {0}")]
+    /// IPv6 destination body (address and port) could not be read.
     Ipv6Unreadable(#[source] io::Error),
     #[error("cannot read port number: {0}")]
-    /// The two-byte port could not be read.
+    /// A domain destination's two-byte port could not be read.
     PortNumberUnreadable(#[source] io::Error),
     #[error("cannot read domain length: {0}")]
     /// The domain-length octet could not be read.
@@ -64,68 +64,63 @@ impl fmt::Display for TargetAddr {
     }
 }
 
-enum Addr {
-    V4([u8; 4]),
-    V6([u8; 16]),
-    Domain(String),
-}
-
 pub(crate) async fn read_address<T: AsyncRead + Unpin>(
     stream: &mut T,
     atyp: u8,
 ) -> Result<TargetAddr, AddrError> {
-    let addr = match atyp {
+    match atyp {
         consts::SOCKS5_ADDR_TYPE_IPV4 => {
             debug!("Address type `IPv4`");
-            Addr::V4(
-                read_exact(stream, [0_u8; 4])
-                    .await
-                    .map_err(AddrError::Ipv4Unreadable)?,
-            )
+            let mut body = [0_u8; 6];
+            stream
+                .read_exact(&mut body)
+                .await
+                .map_err(AddrError::Ipv4Unreadable)?;
+            let [a, b, c, d, high, low] = body;
+            Ok(TargetAddr::Ip(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::new(a, b, c, d),
+                u16::from_be_bytes([high, low]),
+            ))))
         }
         consts::SOCKS5_ADDR_TYPE_IPV6 => {
             debug!("Address type `IPv6`");
-            Addr::V6(
-                read_exact(stream, [0_u8; 16])
-                    .await
-                    .map_err(AddrError::Ipv6Unreadable)?,
-            )
+            let mut body = [0_u8; 18];
+            stream
+                .read_exact(&mut body)
+                .await
+                .map_err(AddrError::Ipv6Unreadable)?;
+            let [bytes @ .., high, low] = body;
+            Ok(TargetAddr::Ip(SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::from(bytes),
+                u16::from_be_bytes([high, low]),
+                0,
+                0,
+            ))))
         }
         consts::SOCKS5_ADDR_TYPE_DOMAIN_NAME => {
             debug!("Address type `domain`");
-            let len = read_exact(stream, [0_u8])
+            let len = stream
+                .read_u8()
                 .await
-                .map_err(AddrError::DomainLenUnreadable)?[0];
+                .map_err(AddrError::DomainLenUnreadable)?;
             if len == 0 {
                 return Err(AddrError::EmptyDomain);
             }
-            let domain = read_exact(stream, vec![0_u8; usize::from(len)])
+            let mut bytes = vec![0; usize::from(len)];
+            stream
+                .read_exact(&mut bytes)
                 .await
                 .map_err(AddrError::DomainContentUnreadable)?;
-            Addr::Domain(
-                String::from_utf8(domain).map_err(|err| AddrError::Utf8(err.utf8_error()))?,
-            )
+            // Decode before reading the port so an invalid domain fails without
+            // waiting for more bytes, regardless of how the transport fragments it.
+            let domain =
+                String::from_utf8(bytes).map_err(|err| AddrError::Utf8(err.utf8_error()))?;
+            let port = stream
+                .read_u16()
+                .await
+                .map_err(AddrError::PortNumberUnreadable)?;
+            Ok(TargetAddr::Domain(domain, port))
         }
-        _ => return Err(AddrError::IncorrectAddressType),
-    };
-
-    let port = u16::from_be_bytes(
-        read_exact(stream, [0_u8; 2])
-            .await
-            .map_err(AddrError::PortNumberUnreadable)?,
-    );
-
-    Ok(match addr {
-        Addr::V4([a, b, c, d]) => TargetAddr::Ip(SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::new(a, b, c, d),
-            port,
-        ))),
-        Addr::V6(bytes) => TargetAddr::Ip(SocketAddr::V6(SocketAddrV6::new(
-            Ipv6Addr::from(bytes),
-            port,
-            0,
-            0,
-        ))),
-        Addr::Domain(domain) => TargetAddr::Domain(domain, port),
-    })
+        _ => Err(AddrError::IncorrectAddressType),
+    }
 }

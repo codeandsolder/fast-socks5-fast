@@ -65,3 +65,9 @@ For complete, runnable in-memory exchanges, see
 
 The crate retains the published package name `fast-socks5` and uses the
 fleet-approved dated nightly pinned in `rust-toolchain.toml`.
+
+IP request address and port bytes are read together; an incomplete IPv4 or
+IPv6 body reports the corresponding address error. Domain fields retain
+separate errors and reject invalid UTF-8 before waiting for the port.
+
+Run the portable method-search benchmarks with `cargo bench --locked --lib offer_`.

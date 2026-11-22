@@ -27,16 +27,6 @@
 #![cfg_attr(test, feature(test))]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-// Internal I/O helper; return the caller's buffer without copying its contents.
-async fn read_exact<T, B>(stream: &mut T, mut buffer: B) -> std::io::Result<B>
-where
-    T: tokio::io::AsyncRead + Unpin,
-    B: AsMut<[u8]>,
-{
-    tokio::io::AsyncReadExt::read_exact(stream, buffer.as_mut()).await?;
-    Ok(buffer)
-}
-
 /// Server-side SOCKS5 authentication and command-parsing state machines.
 pub mod server;
 /// Shared SOCKS5 wire-format utilities.

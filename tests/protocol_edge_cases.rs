@@ -537,3 +537,60 @@ async fn failed_error_reply_preserves_original_protocol_error() -> TestResult {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn truncated_ip_destination_body_reports_address_error() -> TestResult {
+    use fast_socks5::util::target_addr::AddrError;
+
+    for (atyp, body_len) in [(1_u8, 6), (4, 18)] {
+        for partial_len in 0..body_len {
+            let (mut client, server) = tokio::io::duplex(64);
+            client.write_all(&[5, 1, 0, atyp]).await?;
+            client.write_all(&vec![0; partial_len]).await?;
+            client.shutdown().await?;
+            let protocol = Socks5ServerProtocol::skip_auth_this_is_not_rfc_compliant(server);
+            let result = protocol.read_command().await;
+            assert!(matches!(
+                (atyp, result),
+                (
+                    1,
+                    Err(SocksServerError::AddrError(AddrError::Ipv4Unreadable(_)))
+                ) | (
+                    4,
+                    Err(SocksServerError::AddrError(AddrError::Ipv6Unreadable(_)))
+                )
+            ));
+            let mut reply = [0; 10];
+            client.read_exact(&mut reply).await?;
+            assert_eq!(reply, [5, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn ip_destination_read_leaves_pipelined_payload_for_caller() -> TestResult {
+    for (atyp, body) in [
+        (1_u8, vec![127, 0, 0, 1, 0, 80]),
+        (4, [vec![0; 15], vec![1, 0, 80]].concat()),
+    ] {
+        let (mut client, server) = tokio::io::duplex(64);
+        client.write_all(&[5, 1, 0, atyp]).await?;
+        client.write_all(&body).await?;
+        client.write_all(b"data").await?;
+        let protocol = Socks5ServerProtocol::skip_auth_this_is_not_rfc_compliant(server);
+        let (proto, command, target) = protocol.read_command().await?;
+        assert_eq!(command, Socks5Command::TcpConnect);
+        let expected: SocketAddr = if atyp == 1 {
+            "127.0.0.1:80".parse()?
+        } else {
+            "[::1]:80".parse()?
+        };
+        assert_eq!(target, TargetAddr::Ip(expected));
+        let mut stream = proto.reply_success(([0, 0, 0, 0], 0).into()).await?;
+        let mut payload = [0; 4];
+        stream.read_exact(&mut payload).await?;
+        assert_eq!(&payload, b"data");
+    }
+    Ok(())
+}

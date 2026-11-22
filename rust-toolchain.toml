@@ -1,3 +1,4 @@
+# Centrally selected fleet compiler. Promote only through the nightly cohort gate.
 [toolchain]
 channel = "nightly-2026-11-19"
 components = ["rustfmt", "clippy"]
