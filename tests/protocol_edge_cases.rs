@@ -513,7 +513,7 @@ async fn custom_method_negotiation_respects_server_order_and_rejects_reserved_id
         match (expected, task.await?) {
             (Some(expected), Ok(actual)) => assert_eq!(actual, expected),
             (None, Err(SocksServerError::AuthMethodUnacceptable(actual))) => {
-                assert_eq!(actual, offered)
+                assert_eq!(actual, offered);
             }
             _ => return Err("unexpected custom method negotiation result".into()),
         }
