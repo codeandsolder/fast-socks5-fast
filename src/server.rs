@@ -4,7 +4,7 @@ use log::{debug, error, trace};
 use std::io;
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::simd::{cmp::SimdPartialEq, u8x16};
+use std::simd::{Simd, cmp::SimdPartialEq};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(thiserror::Error, Debug)]
@@ -438,22 +438,90 @@ impl StandardAuthentication {
     }
 }
 
-// A normal greeting carries only a handful of methods. Longer offers can use
-// baseline-width portable SIMD, including an overlapping final load for a tail.
+// One- to three-method greetings stay on the scalar path. Choose widths by the
+// available input length, not a hardware-specific feature, so wider scans
+// remain portable and the common one- or two-method greeting stays small.
 #[inline]
 fn offered_contains(methods: &[u8], id: u8) -> bool {
-    if methods.len() < u8x16::LEN {
-        return methods.contains(&id);
+    let Some((&first, remaining)) = methods.split_first() else {
+        return false;
+    };
+    if first == id {
+        return true;
     }
-    let needle = u8x16::splat(id);
-    let (chunks, tail) = methods.as_chunks::<{ u8x16::LEN }>();
+    match methods.len() {
+        1..4 => remaining.contains(&id),
+        4..8 => overlapping_contains::<4>(methods, id),
+        8..16 => overlapping_contains::<8>(methods, id),
+        16..32 => overlapping_contains::<16>(methods, id),
+        32..64 => overlapping_contains::<32>(methods, id),
+        _ => vector_contains::<64>(methods, id),
+    }
+}
+
+// For N <= len < 2*N, the first and last vectors cover the entire slice.
+// Overlap is harmless for a membership query, and both loads are in bounds.
+#[inline]
+fn overlapping_contains<const N: usize>(methods: &[u8], id: u8) -> bool {
+    let needle = Simd::<u8, N>::splat(id);
+    let (Some(first), Some(last)) = (methods.first_chunk::<N>(), methods.last_chunk::<N>()) else {
+        return false;
+    };
+    (Simd::from_array(*first).simd_eq(needle) | Simd::from_array(*last).simd_eq(needle)).any()
+}
+
+#[inline]
+fn vector_contains<const N: usize>(methods: &[u8], id: u8) -> bool {
+    let needle = Simd::<u8, N>::splat(id);
+    let (chunks, tail) = methods.as_chunks::<N>();
     chunks
         .iter()
-        .any(|chunk| u8x16::from_array(*chunk).simd_eq(needle).any())
+        .any(|chunk| Simd::from_array(*chunk).simd_eq(needle).any())
         || (!tail.is_empty()
             && methods
-                .last_chunk::<{ u8x16::LEN }>()
-                .is_some_and(|chunk| u8x16::from_array(*chunk).simd_eq(needle).any()))
+                .last_chunk::<N>()
+                .is_some_and(|chunk| Simd::from_array(*chunk).simd_eq(needle).any()))
+}
+
+// Large custom method sets can otherwise scan the same offer many times.
+// Four speculative SIMD searches retain cheap early matches. The byte-wide
+// table avoids the read-modify-write dependency of a packed bitset.
+const INDEXED_METHOD_THRESHOLD: usize = 64;
+const SPECULATIVE_METHODS: usize = 4;
+
+#[inline]
+fn select_method<T, M: AuthMethod<T>>(server: &[M], offered: &[u8]) -> Option<(M, u8)> {
+    if server.len() >= INDEXED_METHOD_THRESHOLD {
+        select_indexed(server, offered)
+    } else {
+        select_scanned(server, offered)
+    }
+}
+
+#[inline]
+fn select_scanned<T, M: AuthMethod<T>>(server: &[M], offered: &[u8]) -> Option<(M, u8)> {
+    server.iter().find_map(|&method| {
+        let id = method.method_id();
+        (id != consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE && offered_contains(offered, id))
+            .then_some((method, id))
+    })
+}
+
+#[cold]
+fn select_indexed<T, M: AuthMethod<T>>(server: &[M], offered: &[u8]) -> Option<(M, u8)> {
+    let (initial, rest) = server.split_at(SPECULATIVE_METHODS);
+    if let Some(candidate) = select_scanned(initial, offered) {
+        return Some(candidate);
+    }
+    let mut present = [false; u8::MAX as usize + 1];
+    for &id in offered {
+        present[usize::from(id)] = true;
+    }
+    present[usize::from(consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE)] = false;
+    rest.iter().find_map(|&method| {
+        let id = method.method_id();
+        present[usize::from(id)].then_some((method, id))
+    })
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::Opened> {
@@ -499,15 +567,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::O
 
             // Preference is server order. Evaluate each custom method ID once;
             // 0xff is a rejection status, never an authentication method.
-            server_methods
-                .iter()
-                .find_map(|&method| {
-                    let id = method.method_id();
-                    (id != consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE
-                        && offered_contains(methods, id))
-                    .then_some((method, id))
-                })
-                .ok_or_else(|| methods.to_vec())
+            select_method(server_methods, methods).ok_or_else(|| methods.to_vec())
         };
 
         match selection {
@@ -681,14 +741,15 @@ fn new_reply(error: ReplyError, sock_addr: SocketAddr) -> ([u8; 22], usize) {
 #[cfg(test)]
 mod tests {
     extern crate test;
-    use super::{offered_contains, u8x16};
+    use super::{AuthMethod, offered_contains, select_method};
+    use std::cell::Cell;
     use std::hint::black_box;
     use test::Bencher;
 
     #[test]
     fn offered_method_search_matches_scalar_for_all_protocol_lengths_and_positions() {
-        let mut backing = [0x77; u8::MAX as usize + u8x16::LEN - 1];
-        for offset in 0..u8x16::LEN {
+        let mut backing = [0x77; u8::MAX as usize + 64 - 1];
+        for offset in 0..64 {
             for len in 0..=usize::from(u8::MAX) {
                 let methods = &mut backing[offset..offset + len];
                 assert!(!offered_contains(methods, 0));
@@ -708,6 +769,106 @@ mod tests {
             let methods = &alphabet[..len];
             for id in 0..=u8::MAX {
                 assert_eq!(offered_contains(methods, id), methods.contains(&id));
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct CountedMethod<'a> {
+        id: u8,
+        position: usize,
+        visits: &'a Cell<usize>,
+    }
+
+    impl AuthMethod<()> for CountedMethod<'_> {
+        type StartingState = u8;
+
+        fn method_id(self) -> u8 {
+            // Enforce exactly-once, lazy evaluation in server preference order.
+            assert_eq!(self.visits.get(), self.position);
+            self.visits.set(self.position + 1);
+            self.id
+        }
+
+        fn start(self, (): ()) -> Self::StartingState {
+            self.id
+        }
+    }
+
+    #[test]
+    fn method_selection_preserves_exact_preference_and_lazy_metadata_evaluation() {
+        for count in [0_usize, 1, 4, 5, 63, 64, 65, 255, 1_024] {
+            for target in [
+                None,
+                Some(0),
+                Some(3),
+                Some(4),
+                Some(count / 2),
+                count.checked_sub(1),
+            ] {
+                let visits = Cell::new(0);
+                let methods: Vec<_> = (0..count)
+                    .map(|position| CountedMethod {
+                        id: if target == Some(position) {
+                            0x81
+                        } else if position % 2 == 0 {
+                            0xff
+                        } else {
+                            0x82
+                        },
+                        position,
+                        visits: &visits,
+                    })
+                    .collect();
+
+                // Reserved IDs and duplicate offers must not affect preference.
+                let offered = [0xff, 0x81, 0xff, 0x81];
+                let result =
+                    select_method(&methods, &offered).map(|(method, id)| (method.position, id));
+                let expected = target.filter(|&position| position < count);
+                assert_eq!(result, expected.map(|position| (position, 0x81)));
+                assert_eq!(
+                    visits.get(),
+                    expected.map_or(count, |position| position + 1)
+                );
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct Identifier(u8);
+
+    impl AuthMethod<()> for Identifier {
+        type StartingState = u8;
+
+        fn method_id(self) -> u8 {
+            self.0
+        }
+
+        fn start(self, (): ()) -> Self::StartingState {
+            self.0
+        }
+    }
+
+    #[test]
+    fn indexed_selection_matches_scalar_for_all_byte_values_and_offer_lengths() {
+        for server_len in [0, 1, 2, 63, 64, 65, 255, 256, 1_024] {
+            for offset in [0_u8, 1, 63, 127, 254, 255] {
+                let methods: Vec<_> = (0..=u8::MAX)
+                    .cycle()
+                    .take(server_len)
+                    .map(|id| Identifier(id.wrapping_add(offset)))
+                    .collect();
+                for len in 0..=u8::MAX {
+                    let offered: Vec<_> = (0..len)
+                        .map(|id| id.wrapping_mul(197).wrapping_add(13))
+                        .collect();
+                    let actual = select_method(&methods, &offered).map(|(_, id)| id);
+                    let expected = methods.iter().find_map(|method| {
+                        (method.0 != 0xff && offered.contains(&method.0)).then_some(method.0)
+                    });
+                    assert_eq!(actual, expected);
+                }
             }
         }
     }
@@ -738,5 +899,18 @@ mod tests {
         let mut methods = [0x77; u8::MAX as usize];
         methods[usize::from(u8::MAX) - 1] = 2;
         b.iter(|| offered_contains(black_box(methods.as_slice()), black_box(2)));
+    }
+    #[bench]
+    fn full_method_set_scanned(b: &mut Bencher) {
+        let server: Vec<_> = (0..u8::MAX).map(Identifier).collect();
+        let offered = [u8::MAX - 1; u8::MAX as usize];
+        b.iter(|| super::select_scanned(black_box(&server), black_box(&offered)));
+    }
+
+    #[bench]
+    fn full_method_set_indexed(b: &mut Bencher) {
+        let server: Vec<_> = (0..u8::MAX).map(Identifier).collect();
+        let offered = [u8::MAX - 1; u8::MAX as usize];
+        b.iter(|| select_method(black_box(&server), black_box(&offered)));
     }
 }
