@@ -154,7 +154,7 @@ pub enum ReplyError {
 impl ReplyError {
     #[inline]
     #[rustfmt::skip]
-    #[must_use]
+    #[must_use = "the encoded reply octet is needed to write the wire response"]
     /// Encode this reply as an RFC 1928 status octet.
     pub const fn as_u8(self) -> u8 {
         match self {
@@ -174,7 +174,7 @@ impl ReplyError {
     #[inline]
     #[rustfmt::skip]
     /// Decode a SOCKS5 reply code, returning `None` for an unknown wire value.
-    #[must_use]
+    #[must_use = "the returned variant identifies the decoded wire reply"]
     pub const fn from_u8(code: u8) -> Option<Self> {
         match code {
             consts::SOCKS5_REPLY_SUCCEEDED                  => Some(Self::Succeeded),

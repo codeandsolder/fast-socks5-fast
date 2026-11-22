@@ -37,7 +37,7 @@ pub enum AddrError {
 
 impl AddrError {
     /// Translate a malformed address into a SOCKS5 reply status.
-    #[must_use]
+    #[must_use = "the returned status is needed to report the address-decoding error"]
     pub const fn to_reply_error(&self) -> ReplyError {
         match self {
             Self::IncorrectAddressType => ReplyError::AddressTypeNotSupported,
