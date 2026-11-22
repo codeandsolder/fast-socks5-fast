@@ -594,3 +594,35 @@ async fn ip_destination_read_leaves_pipelined_payload_for_caller() -> TestResult
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn large_custom_method_sets_preserve_server_preference_and_rejection_bytes() -> TestResult {
+    for (offers, expected) in [
+        ([0xff, 0x80, 0x81, 0x80], Some(0x81)),
+        ([0xff, 0x83, 0x83, 0xff], None),
+    ] {
+        let (mut client, server) = tokio::io::duplex(1);
+        let task = tokio::spawn(async move {
+            let mut methods = vec![TestMethod(0xff); 65];
+            methods[32] = TestMethod(0x81);
+            methods[64] = TestMethod(0x80);
+            Socks5ServerProtocol::start(server)
+                .negotiate_auth(&methods)
+                .await
+        });
+        for byte in [5, 4].into_iter().chain(offers) {
+            timeout(Duration::from_secs(1), client.write_all(&[byte])).await??;
+        }
+        let mut reply = [0; 2];
+        timeout(Duration::from_secs(1), client.read_exact(&mut reply)).await??;
+        assert_eq!(reply, [5, expected.unwrap_or(0xff)]);
+        match (expected, timeout(Duration::from_secs(1), task).await??) {
+            (Some(expected), Ok(actual)) => assert_eq!(actual, expected),
+            (None, Err(SocksServerError::AuthMethodUnacceptable(actual))) => {
+                assert_eq!(actual, offers);
+            }
+            _ => return Err("unexpected indexed negotiation result".into()),
+        }
+    }
+    Ok(())
+}
