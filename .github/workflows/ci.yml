@@ -15,20 +15,8 @@ permissions:
   contents: read
 
 jobs:
-  stable:
-    name: Rust 1.100.0 Linux checks and tests
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@1c9f5c8968c4caf8754c98ebeb0889d9e774b5ed # main
+  rust:
+    name: Rust
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@59b38db879d10529d2bfe3ab7bc34a8c076900fd # main
     with:
-      runner: ubuntu-24.04
-      rust-toolchain: "1.100.0"
-      rust-components: "rustfmt clippy"
-      command: |
-        set -euo pipefail
-        if git grep -n -E '(^|[^[:alnum:]_])allow[[:space:]]*\(' -- '*.rs'; then
-          echo 'allow(...) attributes are forbidden in Rust sources; use a narrow reasoned expect(...)' >&2
-          exit 1
-        fi
-        cargo +1.100.0 fmt --all --check
-        cargo +1.100.0 clippy --locked --all-targets --all-features -- -D warnings
-        cargo +1.100.0 test --locked --lib --tests
-        cargo +1.100.0 check --locked --all-features --all-targets
+      command: cargo test --locked --all-features

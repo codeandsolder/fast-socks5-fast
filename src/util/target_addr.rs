@@ -1,10 +1,10 @@
 use crate::ReplyError;
-use crate::consts;
+use crate::{consts, read_exact};
 use log::debug;
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::AsyncRead;
 
 #[derive(thiserror::Error, Debug)]
 /// Errors while decoding a SOCKS5 destination address.
@@ -77,19 +77,30 @@ pub(crate) async fn read_address<T: AsyncRead + Unpin>(
     let addr = match atyp {
         consts::SOCKS5_ADDR_TYPE_IPV4 => {
             debug!("Address type `IPv4`");
-            Addr::V4(read_exact!(stream, [0_u8; 4]).map_err(AddrError::Ipv4Unreadable)?)
+            Addr::V4(
+                read_exact(stream, [0_u8; 4])
+                    .await
+                    .map_err(AddrError::Ipv4Unreadable)?,
+            )
         }
         consts::SOCKS5_ADDR_TYPE_IPV6 => {
             debug!("Address type `IPv6`");
-            Addr::V6(read_exact!(stream, [0_u8; 16]).map_err(AddrError::Ipv6Unreadable)?)
+            Addr::V6(
+                read_exact(stream, [0_u8; 16])
+                    .await
+                    .map_err(AddrError::Ipv6Unreadable)?,
+            )
         }
         consts::SOCKS5_ADDR_TYPE_DOMAIN_NAME => {
             debug!("Address type `domain`");
-            let len = read_exact!(stream, [0_u8]).map_err(AddrError::DomainLenUnreadable)?[0];
+            let len = read_exact(stream, [0_u8])
+                .await
+                .map_err(AddrError::DomainLenUnreadable)?[0];
             if len == 0 {
                 return Err(AddrError::EmptyDomain);
             }
-            let domain = read_exact!(stream, vec![0_u8; usize::from(len)])
+            let domain = read_exact(stream, vec![0_u8; usize::from(len)])
+                .await
                 .map_err(AddrError::DomainContentUnreadable)?;
             Addr::Domain(
                 String::from_utf8(domain).map_err(|err| AddrError::Utf8(err.utf8_error()))?,
@@ -99,7 +110,9 @@ pub(crate) async fn read_address<T: AsyncRead + Unpin>(
     };
 
     let port = u16::from_be_bytes(
-        read_exact!(stream, [0_u8; 2]).map_err(AddrError::PortNumberUnreadable)?,
+        read_exact(stream, [0_u8; 2])
+            .await
+            .map_err(AddrError::PortNumberUnreadable)?,
     );
 
     Ok(match addr {

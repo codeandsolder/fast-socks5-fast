@@ -520,3 +520,20 @@ async fn custom_method_negotiation_respects_server_order_and_rejects_reserved_id
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn failed_error_reply_preserves_original_protocol_error() -> TestResult {
+    for (header, reserved) in [([5, 1, 1, 3], true), ([5, 0xf0, 0, 3], false)] {
+        let (mut client, server) = tokio::io::duplex(64);
+        client.write_all(&header).await?;
+        drop(client);
+        let protocol = Socks5ServerProtocol::skip_auth_this_is_not_rfc_compliant(server);
+        let result = protocol.read_command().await;
+        assert!(matches!(
+            (reserved, result),
+            (true, Err(SocksServerError::InvalidReservedByte(1)))
+                | (false, Err(SocksServerError::UnknownCommand(0xf0)))
+        ));
+    }
+    Ok(())
+}

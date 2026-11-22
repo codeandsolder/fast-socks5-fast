@@ -1,9 +1,10 @@
 use crate::util::target_addr::{AddrError, TargetAddr, read_address};
-use crate::{ReplyError, Socks5Command, consts};
+use crate::{ReplyError, Socks5Command, consts, read_exact};
 use log::{debug, error, trace};
 use std::io;
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::simd::{cmp::SimdPartialEq, u8x16};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(thiserror::Error, Debug)]
@@ -220,7 +221,7 @@ impl<T> AuthMethod<T> for NoAuthentication {
     type StartingState = NoAuthenticationImpl<T>;
 
     fn method_id(self) -> u8 {
-        0x00
+        consts::SOCKS5_AUTH_METHOD_NONE
     }
 
     fn start(self, inner: T) -> Self::StartingState {
@@ -271,7 +272,9 @@ impl<T: AsyncRead + Unpin> PasswordAuthenticationImpl<T, password_states::Starte
     > {
         let mut socket = self.inner;
         trace!("PasswordAuthenticationStarted: read_username_password()");
-        let [version, user_len] = read_exact!(socket, [0u8; 2]).err_when("reading user len")?;
+        let [version, user_len] = read_exact(&mut socket, [0u8; 2])
+            .await
+            .err_when("reading user len")?;
         trace!("Password authentication username field length: {user_len}");
         if version != 1 {
             return Err(SocksServerError::UnsupportedPasswordVersion(version));
@@ -281,19 +284,23 @@ impl<T: AsyncRead + Unpin> PasswordAuthenticationImpl<T, password_states::Starte
             return Err(SocksServerError::EmptyUsername);
         }
 
-        let username =
-            read_exact!(socket, vec![0u8; usize::from(user_len)]).err_when("reading username")?;
+        let username = read_exact(&mut socket, vec![0u8; usize::from(user_len)])
+            .await
+            .err_when("reading username")?;
         // Credential bytes are never logged.
 
-        let [pass_len] = read_exact!(socket, [0u8; 1]).err_when("reading password len")?;
+        let [pass_len] = read_exact(&mut socket, [0u8; 1])
+            .await
+            .err_when("reading password len")?;
         trace!("Password authentication password field length: {pass_len}");
 
         if pass_len < 1 {
             return Err(SocksServerError::EmptyPassword);
         }
 
-        let password =
-            read_exact!(socket, vec![0u8; usize::from(pass_len)]).err_when("reading password")?;
+        let password = read_exact(&mut socket, vec![0u8; usize::from(pass_len)])
+            .await
+            .err_when("reading password")?;
         // The password must never be logged.
 
         Ok((username, password, PasswordAuthenticationImpl::new(socket)))
@@ -350,7 +357,7 @@ impl<T> AuthMethod<T> for PasswordAuthentication {
     type StartingState = PasswordAuthenticationImpl<T, password_states::Started>;
 
     fn method_id(self) -> u8 {
-        0x02
+        consts::SOCKS5_AUTH_METHOD_PASSWORD
     }
 
     fn start(self, inner: T) -> Self::StartingState {
@@ -426,6 +433,23 @@ impl StandardAuthentication {
     }
 }
 
+// A normal greeting carries only a handful of methods. Longer offers can use
+// baseline-width portable SIMD, including an overlapping final load for a tail.
+fn offered_contains(methods: &[u8], id: u8) -> bool {
+    if methods.len() < u8x16::LEN {
+        return methods.contains(&id);
+    }
+    let needle = u8x16::splat(id);
+    let (chunks, tail) = methods.as_chunks::<{ u8x16::LEN }>();
+    chunks
+        .iter()
+        .any(|chunk| u8x16::from_array(*chunk).simd_eq(needle).any())
+        || (!tail.is_empty()
+            && methods
+                .last_chunk::<{ u8x16::LEN }>()
+                .is_some_and(|chunk| u8x16::from_array(*chunk).simd_eq(needle).any()))
+}
+
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::Opened> {
     /// Negotiate an authentication method from a list of supported ones and initialize it.
     ///
@@ -444,8 +468,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::O
         server_methods: &[M],
     ) -> Result<M::StartingState, SocksServerError> {
         trace!("Socks5ServerProtocol: negotiate_auth()");
-        let [version, methods_len] =
-            read_exact!(self.inner, [0u8; 2]).err_when("reading methods")?;
+        let [version, methods_len] = read_exact(&mut self.inner, [0u8; 2])
+            .await
+            .err_when("reading methods")?;
         debug!("Handshake headers: [version: {version}, methods len: {methods_len}]");
 
         if version != consts::SOCKS5_VERSION {
@@ -469,8 +494,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Socks5ServerProtocol<T, states::O
                 .iter()
                 .find_map(|&method| {
                     let id = method.method_id();
-                    (id != consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE && methods.contains(&id))
-                        .then_some((method, id))
+                    (id != consts::SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE
+                        && offered_contains(methods, id))
+                    .then_some((method, id))
                 })
                 .ok_or_else(|| methods.to_vec())
         };
@@ -550,26 +576,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::CommandR
     }
 }
 
-macro_rules! try_notify {
-    ($proto:expr, $e:expr) => {
-        match $e {
-            Ok(res) => res,
-            Err(err) => {
-                if let Err(rep_err) = $proto.reply_error(&err.to_reply_error()).await {
-                    error!(
-                        "extra error while reporting an error to the client: {}",
-                        rep_err
-                    );
-                }
-                return Err(err.into());
-            }
-        }
-    };
-}
-
 impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenticated> {
-    /// Decide to whether or not, accept the authentication method.
-    /// Don't forget that the methods list sent by the client, contains one or more methods.
+    /// Read the authenticated client's SOCKS5 command and destination.
     ///
     /// # Request
     /// ```text
@@ -597,10 +605,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenti
         ),
         SocksServerError,
     > {
-        let [version, cmd, rsv, address_type] =
-            read_exact!(self.inner, [0u8; 4]).err_when("reading command")?;
+        let [version, cmd, rsv, address_type] = read_exact(&mut self.inner, [0u8; 4])
+            .await
+            .err_when("reading command")?;
         debug!(
-            "Request: [version: {version}, command: {cmd}, rev: {rsv}, address_type: {address_type}]",
+            "Request: [version: {version}, command: {cmd}, reserved: {rsv}, address_type: {address_type}]",
         );
 
         if version != consts::SOCKS5_VERSION {
@@ -609,20 +618,28 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5ServerProtocol<T, states::Authenti
 
         let mut proto = Socks5ServerProtocol::new(self.inner);
 
-        // Reject an invalid header before reading a potentially missing address body.
-        if rsv != 0 {
-            let err = SocksServerError::InvalidReservedByte(rsv);
-            proto.reply_error(&err.to_reply_error()).await?;
-            return Err(err);
+        // Reject malformed headers before reading a potentially missing address body.
+        let parsed = async {
+            if rsv != 0 {
+                return Err(SocksServerError::InvalidReservedByte(rsv));
+            }
+            let cmd = Socks5Command::from_u8(cmd).ok_or(SocksServerError::UnknownCommand(cmd))?;
+            let target = read_address(&mut proto.inner, address_type).await?;
+            Ok((cmd, target))
         }
-        let cmd = try_notify!(
-            proto,
-            Socks5Command::from_u8(cmd).ok_or(SocksServerError::UnknownCommand(cmd))
-        );
-        let target_addr = try_notify!(proto, read_address(&mut proto.inner, address_type).await);
-        trace!("Request target parsed");
-
-        Ok((proto, cmd, target_addr))
+        .await;
+        match parsed {
+            Ok((cmd, target)) => {
+                trace!("Request target parsed");
+                Ok((proto, cmd, target))
+            }
+            Err(err) => {
+                if let Err(reply_err) = proto.reply_error(&err.to_reply_error()).await {
+                    error!("extra error while reporting an error to the client: {reply_err}");
+                }
+                Err(err)
+            }
+        }
     }
 }
 
@@ -648,4 +665,65 @@ fn new_reply(error: ReplyError, sock_addr: SocketAddr) -> ([u8; 22], usize) {
         }
     };
     (reply, len)
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate test;
+    use super::{offered_contains, u8x16};
+    use std::hint::black_box;
+    use test::Bencher;
+
+    #[test]
+    fn offered_method_search_matches_scalar_for_all_protocol_lengths_and_positions() {
+        let mut backing = [0x77; u8::MAX as usize + u8x16::LEN - 1];
+        for offset in 0..u8x16::LEN {
+            for len in 0..=usize::from(u8::MAX) {
+                let methods = &mut backing[offset..offset + len];
+                assert!(!offered_contains(methods, 0));
+                assert_eq!(offered_contains(methods, 0x77), !methods.is_empty());
+                for pos in 0..len {
+                    methods[pos] = 0;
+                    assert_eq!(offered_contains(methods, 0), methods.contains(&0));
+                    methods[pos] = 0x77;
+                }
+            }
+        }
+    }
+    #[test]
+    fn offered_method_search_matches_scalar_for_every_octet() {
+        let alphabet: Vec<u8> = (0..=u8::MAX).collect();
+        for len in 0..=usize::from(u8::MAX) {
+            let methods = &alphabet[..len];
+            for id in 0..=u8::MAX {
+                assert_eq!(offered_contains(methods, id), methods.contains(&id));
+            }
+        }
+    }
+
+    // Compare the production kernel directly against the previous slice search.
+    // The small offer is the common case; the longest offer probes the stress case.
+    #[bench]
+    fn short_offer_scalar(b: &mut Bencher) {
+        b.iter(|| black_box([0_u8, 2]).contains(&black_box(2)));
+    }
+
+    #[bench]
+    fn short_offer_current(b: &mut Bencher) {
+        b.iter(|| offered_contains(&black_box([0_u8, 2]), black_box(2)));
+    }
+
+    #[bench]
+    fn full_offer_scalar(b: &mut Bencher) {
+        let mut methods = [0x77; u8::MAX as usize];
+        methods[usize::from(u8::MAX) - 1] = 2;
+        b.iter(|| black_box(&methods).contains(&black_box(2)));
+    }
+
+    #[bench]
+    fn full_offer_current(b: &mut Bencher) {
+        let mut methods = [0x77; u8::MAX as usize];
+        methods[usize::from(u8::MAX) - 1] = 2;
+        b.iter(|| offered_contains(black_box(&methods), black_box(2)));
+    }
 }
