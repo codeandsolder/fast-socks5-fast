@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   rust:
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@0fba011c33c2d3b5c9096e3fb9efea71b570dc46 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@8ec18b20d3af776db1eb8013ab1649acf35a289f # main
     with:
       command: cargo test --locked --all-features
       test-impact-cargo-args: "--locked --all-features"
